@@ -63,6 +63,7 @@ export const tabsSlice = createSlice({
         'workspaceEnvironments',
         'openapi-sync',
         'openapi-spec',
+        'git-review',
         'changelog'
       ];
 
@@ -81,7 +82,10 @@ export const tabsSlice = createSlice({
       if (nonReplaceableTabTypes.includes(type)) {
         const existingTab = tabTypeAlreadyExists(state.tabs, collectionUid, type);
         if (existingTab) {
-          state.activeTabUid = existingTab.uid;
+          if (!existingTab.uid && uid) {
+            existingTab.uid = uid;
+          }
+          state.activeTabUid = existingTab.uid || null;
           return;
         }
       }
@@ -162,6 +166,7 @@ export const tabsSlice = createSlice({
     },
     focusTab: (state, action) => {
       const { uid } = action.payload;
+      if (!uid) return;
       const tabExists = state.tabs.some((t) => t.uid === uid);
       if (tabExists) {
         state.activeTabUid = uid;
@@ -497,6 +502,7 @@ export const tabsSlice = createSlice({
 
       (snapshotTabs || []).forEach((snapshotTab) => {
         const tab = deserializeTab(snapshotTab, collection);
+        if (!tab?.uid) return;
         state.tabs.push(tab);
 
         if (checkIsActiveTab(tab, activeTab, collection)) {

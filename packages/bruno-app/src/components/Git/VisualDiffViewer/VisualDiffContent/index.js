@@ -47,7 +47,13 @@ const VisualDiffContent = ({
       initialCollapsed[key] = !hasChanges;
     });
 
-    setCollapsedSections(initialCollapsed);
+    setCollapsedSections((current) => {
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(initialCollapsed);
+      const unchanged = currentKeys.length === nextKeys.length
+        && nextKeys.every((key) => current[key] === initialCollapsed[key]);
+      return unchanged ? current : initialCollapsed;
+    });
   }, [oldData, newData, sections, sectionHasChanges]);
 
   if (!oldData && !newData) {

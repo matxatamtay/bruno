@@ -13,6 +13,7 @@ jest.mock('nanoid', () => {
 
 const {
   deserializeTab,
+  serializeTab,
   hydrateSnapshotLookups,
   hydrateCollectionTabs,
   isActiveTab,
@@ -271,6 +272,25 @@ describe('hydrateSnapshotLookups', () => {
   });
 });
 
+describe('serializeTab', () => {
+  it('serializes git review as a collection singleton instead of a pathname tab', () => {
+    const collection = { uid: 'collection-uid', pathname: '/collections/a', items: [] };
+    const tab = {
+      uid: 'collection-uid-git-review',
+      collectionUid: 'collection-uid',
+      type: 'git-review',
+      preview: false,
+      pathname: null
+    };
+
+    expect(serializeTab(tab, collection)).toEqual({
+      type: 'git-review',
+      accessor: 'type',
+      permanent: true
+    });
+  });
+});
+
 describe('deserializeTab', () => {
   const collection = {
     uid: 'collection-uid',
@@ -324,6 +344,29 @@ describe('deserializeTab', () => {
 
     const tab = deserializeTab(snapshotTab, collection);
     expect(tab.uid).toBe('collection-uid-global-environment-settings');
+  });
+
+  it('restores git review uid scoped to collection uid', () => {
+    const snapshotTab = {
+      type: 'git-review',
+      accessor: 'type',
+      permanent: true
+    };
+
+    const tab = deserializeTab(snapshotTab, collection);
+    expect(tab.uid).toBe('collection-uid-git-review');
+  });
+
+  it('migrates legacy git review snapshots that were stored without a pathname', () => {
+    const snapshotTab = {
+      type: 'git-review',
+      accessor: 'pathname',
+      pathname: null,
+      permanent: true
+    };
+
+    const tab = deserializeTab(snapshotTab, collection);
+    expect(tab.uid).toBe('collection-uid-git-review');
   });
 
   it('falls back to type-based uid restore for collection-scoped singleton tabs missing pathname', () => {

@@ -46,6 +46,7 @@ import { normalizePath } from 'utils/common/path';
 import classNames from 'classnames';
 import StyledWrapper from './StyledWrapper';
 import { useTheme } from 'providers/Theme';
+import GitActions from 'components/Git/GitActions';
 
 const MIGRATE_PILL_DISMISSED_KEY = 'bruno.migrateToYmlPill.dismissed';
 
@@ -73,7 +74,6 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
 
   // Get the current active workspace
   const currentWorkspace = workspaces.find((w) => w.uid === activeWorkspaceUid);
-  const gitRootPath = collection?.git?.gitRootPath;
 
   // Active request (used by the Request / App / File view-mode toggle)
   const focusedTab = find(tabs, (t) => t.uid === activeTabUid);
@@ -738,6 +738,9 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
                     <IconX size={12} strokeWidth={2} />
                   </button>
                 </div>
+              )}
+              {collection.pathname && (
+                <GitActions key={collection.pathname} collectionPath={collection.pathname} collectionUid={collection.uid} />
               )}
               {/* OpenAPI Sync - standalone only when configured and beta enabled */}
               {hasOpenApiSyncConfigured && (

@@ -974,6 +974,57 @@ const getAheadBehindCount = async (gitRootPath) => {
   }
 };
 
+const getGitRepositoryStatus = async (collectionPath) => {
+  const gitRootPath = getCollectionGitRootPath(collectionPath);
+
+  if (!gitRootPath) {
+    return {
+      isGitRepository: false,
+      branch: '',
+      tracking: '',
+      remoteName: '',
+      remoteBranch: '',
+      hasRemote: false,
+      ahead: 0,
+      behind: 0,
+      changedFiles: 0,
+      stashCount: 0
+    };
+  }
+
+  const git = getSimpleGitInstanceForPath(gitRootPath);
+  const [status, remotes, stashSummary] = await Promise.all([
+    git.status(),
+    git.getRemotes(true),
+    git.stashList()
+  ]);
+
+  const remoteNames = remotes.map((remote) => remote.name);
+  const trackingParts = status.tracking ? status.tracking.split('/') : [];
+  const trackingRemote = trackingParts.shift();
+  const remoteName = remoteNames.includes(trackingRemote)
+    ? trackingRemote
+    : remoteNames.includes('origin')
+      ? 'origin'
+      : remoteNames[0] || '';
+  const remoteBranch = trackingRemote && remoteName === trackingRemote
+    ? trackingParts.join('/')
+    : status.current || '';
+
+  return {
+    isGitRepository: true,
+    branch: status.current || '',
+    tracking: status.tracking || '',
+    remoteName,
+    remoteBranch: remoteBranch || status.current || '',
+    hasRemote: remoteNames.length > 0,
+    ahead: status.ahead || 0,
+    behind: status.behind || 0,
+    changedFiles: status.files?.length || 0,
+    stashCount: stashSummary?.total ?? stashSummary?.all?.length ?? 0
+  };
+};
+
 const abortConflictResolution = async (gitRootPath) => {
   return new Promise((resolve, reject) => {
     const git = getSimpleGitInstanceForPath(gitRootPath);
@@ -1032,34 +1083,136 @@ const continueMerge = async (gitRootPath, conflictedFiles, commitMessage) => {
   });
 };
 
-const getCommitFiles = async (gitRootPath, commitHash) => {
-  return new Promise((resolve, reject) => {
-    const git = getSimpleGitInstanceForPath(gitRootPath);
-    // Get the list of files changed in this commit with stats
-    git.raw(['show', '--stat', '--name-status', '--format=', commitHash], (err, result) => {
-      if (err) {
-        reject(err);
-        return;
-      }
+const normalizeGitPath = (value = '') => value.replace(/\\/g, '/').replace(/^\.\//, '');
 
-      const lines = result.trim().split('\n').filter((line) => line.trim());
-      const files = [];
+const parseChangedFiles = (result = '') => {
+  const lines = result.trim().split('\n').filter((line) => line.trim());
+  const files = [];
 
-      for (const line of lines) {
-        // Parse name-status format: M<tab>filename or A<tab>filename or D<tab>filename
-        const match = line.match(/^([AMDRC])\t(.+)$/);
-        if (match) {
-          const [, status, filePath] = match;
-          files.push({
-            path: filePath,
-            status: status === 'A' ? 'added' : status === 'D' ? 'deleted' : status === 'M' ? 'modified' : status === 'R' ? 'renamed' : 'changed'
-          });
-        }
-      }
+  for (const line of lines) {
+    const parts = line.split('\t');
+    const statusCode = parts[0] || '';
+    const status = statusCode.charAt(0);
 
-      resolve(files);
+    if (status === 'R' || status === 'C') {
+      const oldPath = normalizeGitPath(parts[1]);
+      const newPath = normalizeGitPath(parts[2]);
+      if (!oldPath || !newPath) continue;
+      files.push({
+        path: newPath,
+        oldPath,
+        status: status === 'R' ? 'renamed' : 'copied'
+      });
+      continue;
+    }
+
+    const filePath = normalizeGitPath(parts[1]);
+    if (!filePath) continue;
+    files.push({
+      path: filePath,
+      oldPath: filePath,
+      status: status === 'A'
+        ? 'added'
+        : status === 'D'
+          ? 'deleted'
+          : status === 'M'
+            ? 'modified'
+            : 'changed'
     });
+  }
+
+  return files;
+};
+
+const getCommitFiles = async (gitRootPath, commitHash) => {
+  const git = getSimpleGitInstanceForPath(gitRootPath);
+  let result;
+
+  try {
+    const firstParent = (await git.raw(['rev-parse', `${commitHash}^1`])).trim();
+    result = await git.raw(['diff', '--name-status', '-M', firstParent, commitHash]);
+  } catch (err) {
+    // Root commits have no parent. diff-tree --root compares them against an empty tree.
+    result = await git.raw(['diff-tree', '--root', '--no-commit-id', '--name-status', '-r', '-M', commitHash]);
+  }
+
+  return parseChangedFiles(result);
+};
+
+const getCurrentBranchCommitHistory = async (collectionPath, limit = 100) => {
+  const gitRootPath = getCollectionGitRootPath(collectionPath);
+  if (!gitRootPath) {
+    return { branch: '', commits: [], hasMore: false };
+  }
+
+  const git = getSimpleGitInstanceForPath(gitRootPath);
+  const status = await git.status();
+  const branch = status.current || 'HEAD';
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
+  const result = await git.raw([
+    'log',
+    '--date-order',
+    '--format=%H%x00%P%x00%s%x00%an%x00%aI',
+    '-n', String(safeLimit + 1),
+    branch
+  ]);
+
+  const lines = result.trim().split('\n').filter(Boolean);
+  const hasMore = lines.length > safeLimit;
+  const commits = lines.slice(0, safeLimit).map((line) => {
+    const [hash, parents = '', message = '', author = '', date = ''] = line.split('\0');
+    const parentList = parents.split(' ').filter(Boolean);
+    return {
+      hash,
+      message,
+      author_name: author,
+      date,
+      isMerge: parentList.length > 1,
+      parents: parentList
+    };
   });
+
+  return {
+    branch: status.current || '',
+    commits,
+    hasMore
+  };
+};
+
+const getCommitFilesForCollection = async (collectionPath, commitHash) => {
+  const gitRootPath = getCollectionGitRootPath(collectionPath);
+  if (!gitRootPath) {
+    throw new Error('This collection is not inside a Git repository');
+  }
+
+  const collectionRoot = normalizeGitPath(path.relative(gitRootPath, collectionPath));
+  const isInsideCollection = (filePath) => {
+    const normalized = normalizeGitPath(filePath);
+    return !collectionRoot || normalized === collectionRoot || normalized.startsWith(`${collectionRoot}/`);
+  };
+  const toCollectionRelativePath = (filePath) => {
+    const normalized = normalizeGitPath(filePath);
+    if (!collectionRoot) return normalized;
+    if (normalized === collectionRoot) return '';
+    return normalized.startsWith(`${collectionRoot}/`)
+      ? normalized.slice(collectionRoot.length + 1)
+      : normalized;
+  };
+
+  const files = await getCommitFiles(gitRootPath, commitHash);
+  return files
+    .filter((file) => isInsideCollection(file.path) || isInsideCollection(file.oldPath))
+    .map((file) => {
+      const currentPathIsInside = isInsideCollection(file.path);
+      const displayGitPath = currentPathIsInside ? file.path : file.oldPath;
+      return {
+        ...file,
+        collectionRelativePath: toCollectionRelativePath(displayGitPath),
+        absolutePath: path.join(gitRootPath, file.path),
+        oldAbsolutePath: path.join(gitRootPath, file.oldPath || file.path),
+        supportsVisualDiff: supportsVisualDiff(file.path) || supportsVisualDiff(file.oldPath)
+      };
+    });
 };
 
 const getCommitFileDiff = async (gitRootPath, commitHash, filePath) => {
@@ -1335,6 +1488,19 @@ const dropStash = async (gitRootPath, stashIndex) => {
   });
 };
 
+const popLatestStash = async (gitRootPath) => {
+  return new Promise((resolve, reject) => {
+    const git = getSimpleGitInstanceForPath(gitRootPath);
+    git.stash(['pop', 'stash@{0}'], (err, result) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(result);
+    });
+  });
+};
+
 /**
  * Get list of files in a stash (both tracked and untracked)
  * @param {string} gitRootPath - Path to git repository
@@ -1489,7 +1655,7 @@ const parseContentForVisualDiff = (content, filePath) => {
  * @param {string} filePath - Path to the file
  * @returns {Promise<{oldContent: string|null, newContent: string|null, oldParsed: object|null, newParsed: object|null}>} Old and new file content
  */
-const getFileContentForVisualDiff = async (gitRootPath, commitHash, filePath) => {
+const getFileContentForVisualDiff = async (gitRootPath, commitHash, filePath, oldFilePath = filePath) => {
   const git = getSimpleGitInstanceForPath(gitRootPath);
   const canParseVisualDiff = supportsVisualDiff(filePath);
 
@@ -1506,7 +1672,7 @@ const getFileContentForVisualDiff = async (gitRootPath, commitHash, filePath) =>
     // Get the old content (at the parent commit)
     let oldContent = null;
     try {
-      oldContent = await git.raw(['show', `${commitHash}^:${filePath}`]);
+      oldContent = await git.raw(['show', `${commitHash}^:${oldFilePath}`]);
     } catch (err) {
       // File might not exist in parent (newly added)
       oldContent = null;
@@ -1793,9 +1959,12 @@ module.exports = {
   getAheadBehindCount,
   getAheadCount,
   getBehindCount,
+  getGitRepositoryStatus,
   abortConflictResolution,
   continueMerge,
   getCommitFiles,
+  getCurrentBranchCommitHistory,
+  getCommitFilesForCollection,
   getCommitFileDiff,
   getCommitCompareFiles,
   getCommitCompareFileDiff,
@@ -1805,6 +1974,7 @@ module.exports = {
   listStashes,
   applyStash,
   dropStash,
+  popLatestStash,
   getStashFiles,
   getStashFileDiff,
   getFileContentAtCommit,

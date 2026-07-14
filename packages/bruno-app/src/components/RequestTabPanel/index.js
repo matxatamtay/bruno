@@ -10,7 +10,7 @@ import ResponsePane from 'components/ResponsePane';
 import GrpcResponsePane from 'components/ResponsePane/GrpcResponsePane';
 import { findItemInCollection, findItemInCollectionByPathname, areItemsLoading } from 'utils/collections';
 import { cancelRequest, sendRequest } from 'providers/ReduxStore/slices/collections/actions';
-import { updateGqlDocsOpen } from 'providers/ReduxStore/slices/tabs';
+import { focusTab, updateGqlDocsOpen } from 'providers/ReduxStore/slices/tabs';
 import RequestNotFound from './RequestNotFound';
 import QueryUrl from 'components/RequestPane/QueryUrl/index';
 import GrpcQueryUrl from 'components/RequestPane/GrpcQueryUrl/index';
@@ -48,6 +48,7 @@ import ChangelogTab from 'components/ChangelogTab';
 import CollapsedPanelIndicator from './CollapsedPanelIndicator';
 import { clampRequestHeightForResponse } from './paneSize';
 import { IconLoader2 } from '@tabler/icons';
+import GitReview from 'components/Git/GitReview';
 
 const MIN_LEFT_PANE_WIDTH = 300;
 const MIN_RIGHT_PANE_WIDTH = 490;
@@ -69,6 +70,7 @@ const RequestTabPanel = () => {
   const tabs = useSelector((state) => state.tabs.tabs);
   const activeTabUid = useSelector((state) => state.tabs.activeTabUid);
   const focusedTab = find(tabs, (t) => t.uid === activeTabUid);
+  const fallbackTabUid = useMemo(() => [...tabs].reverse().find((tab) => tab.uid)?.uid || null, [tabs]);
   const { globalEnvironments, activeGlobalEnvironmentUid } = useSelector((state) => state.globalEnvironments);
   const _collections = useSelector((state) => state.collections.collections);
   const preferences = useSelector((state) => state.app.preferences);
@@ -85,6 +87,12 @@ const RequestTabPanel = () => {
     handleRun();
     return false;
   }, { enabled: !!isRequestTab, deps: [isRequestTab] });
+
+  useEffect(() => {
+    if ((!activeTabUid || !focusedTab) && fallbackTabUid) {
+      dispatch(focusTab({ uid: fallbackTabUid }));
+    }
+  }, [activeTabUid, focusedTab, fallbackTabUid, dispatch]);
 
   // Use ref to avoid stale closure in event handlers
   const isVerticalLayoutRef = useRef(isVerticalLayout);
@@ -439,6 +447,10 @@ const RequestTabPanel = () => {
 
   if (!collection || !collection.uid) {
     return <div className="pb-4 px-4">Collection not found!</div>;
+  }
+
+  if (focusedTab.type === 'git-review') {
+    return <GitReview collection={collection} />;
   }
 
   if (focusedTab.type === 'response-example') {
