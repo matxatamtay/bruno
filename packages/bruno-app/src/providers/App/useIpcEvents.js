@@ -43,6 +43,7 @@ import { addLog } from 'providers/ReduxStore/slices/logs';
 import { loadNotifications } from 'providers/ReduxStore/slices/notifications';
 import { updateSystemResources } from 'providers/ReduxStore/slices/performance';
 import { apiSpecAddFileEvent, apiSpecChangeFileEvent } from 'providers/ReduxStore/slices/apiSpec';
+import { recorderStateReceived, recorderEventReceived } from 'providers/ReduxStore/slices/recorder';
 
 const useIpcEvents = () => {
   const dispatch = useDispatch();
@@ -378,10 +379,20 @@ const useIpcEvents = () => {
       dispatch(brunoConfigUpdateEvent(val));
     });
 
+    const removeRecorderStateListener = ipcRenderer.on('main:recorder-state', (val) => {
+      dispatch(recorderStateReceived(val));
+    });
+
+    const removeRecorderEventListener = ipcRenderer.on('main:recorder-event', (val) => {
+      dispatch(recorderEventReceived(val));
+    });
+
     return () => {
       removeCollectionTreeLoadedListener();
       removeCollectionLoadingStateV2Listener();
       removeBrunoConfigUpdateV2Listener();
+      removeRecorderStateListener();
+      removeRecorderEventListener();
       removeCollectionTreeUpdateListener();
       removeApiSpecTreeUpdateListener();
       removeOpenCollectionListener();

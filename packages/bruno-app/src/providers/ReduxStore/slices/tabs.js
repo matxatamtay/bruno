@@ -64,6 +64,7 @@ export const tabsSlice = createSlice({
         'openapi-sync',
         'openapi-spec',
         'git-review',
+        'web-recorder',
         'changelog'
       ];
 

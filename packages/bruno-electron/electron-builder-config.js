@@ -12,6 +12,10 @@ const config = {
     {
       from: 'resources/data/sample-collection.json',
       to: 'data/sample-collection.json'
+    },
+    {
+      from: '../bruno-recorder-extension',
+      to: 'recorder-extension'
     }
   ],
   files: ['**/*'],
@@ -89,7 +93,7 @@ const config = {
       'libatspi2.0-0',
       'libuuid1',
       'libsecret-1-0',
-      'libasound2' // #1036
+      'libasound2t64 | libasound2' // Ubuntu 24.04+ | older Ubuntu/Debian
     ]
   },
   win: {

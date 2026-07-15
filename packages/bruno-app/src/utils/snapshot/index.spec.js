@@ -346,6 +346,27 @@ describe('deserializeTab', () => {
     expect(tab.uid).toBe('collection-uid-global-environment-settings');
   });
 
+  it('restores web recorder uid scoped to collection uid', () => {
+    const tab = deserializeTab({
+      type: 'web-recorder',
+      accessor: 'type',
+      permanent: true
+    }, collection);
+
+    expect(tab.uid).toBe('collection-uid-web-recorder');
+  });
+
+  it('migrates an old web recorder snapshot without pathname', () => {
+    const tab = deserializeTab({
+      type: 'web-recorder',
+      accessor: 'pathname',
+      pathname: null,
+      permanent: true
+    }, collection);
+
+    expect(tab.uid).toBe('collection-uid-web-recorder');
+  });
+
   it('restores git review uid scoped to collection uid', () => {
     const snapshotTab = {
       type: 'git-review',

@@ -49,6 +49,7 @@ import CollapsedPanelIndicator from './CollapsedPanelIndicator';
 import { clampRequestHeightForResponse } from './paneSize';
 import { IconLoader2 } from '@tabler/icons';
 import GitReview from 'components/Git/GitReview';
+import WebRecorder from 'components/WebRecorder';
 
 const MIN_LEFT_PANE_WIDTH = 300;
 const MIN_RIGHT_PANE_WIDTH = 490;
@@ -451,6 +452,10 @@ const RequestTabPanel = () => {
 
   if (focusedTab.type === 'git-review') {
     return <GitReview collection={collection} />;
+  }
+
+  if (focusedTab.type === 'web-recorder') {
+    return <WebRecorder collection={collection} />;
   }
 
   if (focusedTab.type === 'response-example') {

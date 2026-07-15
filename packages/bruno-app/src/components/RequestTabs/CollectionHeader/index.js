@@ -17,7 +17,8 @@ import {
   IconFileOff,
   IconCode,
   IconAppWindow,
-  IconTransform
+  IconTransform,
+  IconPlayerRecord
 } from '@tabler/icons';
 import IconSparkles from 'components/Icons/IconSparkles';
 import OpenAPISyncIcon from 'components/Icons/OpenAPISync';
@@ -257,6 +258,15 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
         type: 'collection-runner'
       })
     );
+  };
+
+  const handleOpenWebRecorder = () => {
+    dispatch(addTab({
+      uid: `${collection.uid}-web-recorder`,
+      collectionUid: collection.uid,
+      type: 'web-recorder',
+      preview: false
+    }));
   };
 
   const viewVariables = () => {
@@ -741,6 +751,13 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
               )}
               {collection.pathname && (
                 <GitActions key={collection.pathname} collectionPath={collection.pathname} collectionUid={collection.uid} />
+              )}
+              {!isScratchCollection && (
+                <ToolHint text="Web Recorder" toolhintId="WebRecorderToolhintId" place="bottom">
+                  <ActionIcon onClick={handleOpenWebRecorder} aria-label="Web Recorder" size="sm" data-testid="web-recorder">
+                    <IconPlayerRecord size={16} strokeWidth={1.5} />
+                  </ActionIcon>
+                </ToolHint>
               )}
               {/* OpenAPI Sync - standalone only when configured and beta enabled */}
               {hasOpenApiSyncConfigured && (

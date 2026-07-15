@@ -196,6 +196,7 @@ const RequestTab = ({ tab, collection, tabIndex, collectionRequestTabs, folderUi
     'openapi-sync',
     'openapi-spec',
     'git-review',
+    'web-recorder',
     'changelog'
   ];
 

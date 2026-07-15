@@ -17,7 +17,8 @@ const SINGLETON_TAB_TYPES = new Set([
   'workspaceEnvironments',
   'openapi-sync',
   'openapi-spec',
-  'git-review'
+  'git-review',
+  'web-recorder'
 ]);
 
 const NON_REPLACEABLE_SINGLETON_TAB_TYPES = new Set([
@@ -615,7 +616,8 @@ export const deserializeTab = (snapshotTab, collection) => {
   const isCollectionScopedSingleton = type === 'preferences'
     || type === 'environment-settings'
     || type === 'global-environment-settings'
-    || type === 'git-review';
+    || type === 'git-review'
+    || type === 'web-recorder';
 
   const needsTypeBasedFallback = accessor === 'type' || (accessor === 'pathname' && !pathname && isCollectionScopedSingleton);
 
@@ -648,6 +650,8 @@ export const deserializeTab = (snapshotTab, collection) => {
       tab.uid = collectionUidFromSnapshot || collection.uid;
     } else if (type === 'git-review') {
       tab.uid = `${collection.uid}-git-review`;
+    } else if (type === 'web-recorder') {
+      tab.uid = `${collection.uid}-web-recorder`;
     } else if (type === 'preferences') {
       tab.uid = `${collection.uid}-preferences`;
     } else if (type === 'environment-settings') {
