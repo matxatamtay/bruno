@@ -1609,6 +1609,18 @@ const getFileContentAtCommit = async (gitRootPath, commitHash, filePath) => {
   }
 };
 
+const getFilesAtCommit = async (gitRootPath, commitHash, pathPrefix = '') => {
+  const git = getSimpleGitInstanceForPath(gitRootPath);
+  const args = ['ls-tree', '-r', '--name-only', commitHash];
+  if (pathPrefix) args.push('--', pathPrefix);
+  try {
+    const result = await git.raw(args);
+    return result.split('\n').map((value) => normalizeGitPath(value.trim())).filter(Boolean);
+  } catch (err) {
+    return [];
+  }
+};
+
 /**
  * Check if file supports visual diff
  * @param {string} filePath - Path to the file
@@ -1978,6 +1990,7 @@ module.exports = {
   getStashFiles,
   getStashFileDiff,
   getFileContentAtCommit,
+  getFilesAtCommit,
   getFileContentForVisualDiff,
   getWorkingFileContentForVisualDiff,
   getStashFileContentForVisualDiff

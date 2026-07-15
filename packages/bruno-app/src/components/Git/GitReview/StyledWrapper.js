@@ -302,8 +302,70 @@ const StyledWrapper = styled.div`
     text-align: center;
   }
 
-  .diff-column { background: ${(props) => props.theme.background.base}; }
-  .request-diff { height: 100%; display: flex; flex-direction: column; min-width: 0; }
+  .diff-column { display: flex; flex-direction: column; background: ${(props) => props.theme.background.base}; }
+  .request-diff { flex: 1; min-height: 0; display: flex; flex-direction: column; min-width: 0; }
+
+  .semantic-loading { display: flex; align-items: center; gap: 7px; padding: 9px 12px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; color: ${(props) => props.theme.colors.text.muted}; font-size: 11px; }
+  .semantic-review { flex: 0 0 auto; max-height: 42%; display: flex; flex-direction: column; border-bottom: 1px solid ${(props) => props.theme.border.border1}; background: ${(props) => props.theme.sidebar.bg}; }
+  .semantic-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; }
+  .semantic-header > div { display: flex; flex-direction: column; }
+  .semantic-header strong { font-size: 12px; }
+  .semantic-header span { color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .run-affected { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid ${(props) => props.theme.primary.solid}; border-radius: ${(props) => props.theme.border.radius.base}; background: ${(props) => rgba(props.theme.primary.solid, 0.12)}; color: ${(props) => props.theme.primary.solid}; font-size: 10px; cursor: pointer; }
+  .semantic-summary { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 8px; }
+  .semantic-summary span { padding: 3px 7px; border: 1px solid currentColor; border-radius: 999px; font-size: 9px; }
+  .semantic-summary b { font-size: 10px; }
+  .semantic-summary .breaking, .semantic-finding.breaking { color: ${(props) => props.theme.colors.text.danger}; }
+  .semantic-summary .warning, .semantic-finding.warning { color: ${(props) => props.theme.colors.text.warning}; }
+  .semantic-summary .secret, .semantic-finding.secret { color: ${(props) => props.theme.colors.text.danger}; }
+  .semantic-summary .affected, .semantic-finding.info { color: ${(props) => props.theme.primary.solid}; }
+  .semantic-findings { overflow: auto; border-top: 1px solid ${(props) => props.theme.border.border1}; }
+  .semantic-finding { width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 0; border-bottom: 1px solid ${(props) => props.theme.border.border1}; background: transparent; text-align: left; cursor: pointer; }
+  .semantic-finding:hover { background: ${(props) => props.theme.sidebar.collection.item.hoverBg}; }
+  .semantic-finding > span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .semantic-finding strong { color: currentColor; font-size: 10px; }
+  .semantic-finding small { color: ${(props) => props.theme.text}; font-size: 10px; }
+  .semantic-finding code { color: ${(props) => props.theme.colors.text.muted}; font-size: 8px; }
+  .semantic-clean, .semantic-partial { padding: 8px 10px; color: ${(props) => props.theme.colors.text.muted}; font-size: 10px; }
+  .semantic-partial { color: ${(props) => props.theme.colors.text.warning}; }
+  .request-row.impacted { opacity: 1; color: ${(props) => props.theme.primary.solid}; background: ${(props) => rgba(props.theme.primary.solid, 0.08)}; }
+  .impact-badge { font-size: 11px; }
+
+  .environment-matrix-wrap { border-top: 1px solid ${(props) => props.theme.border.border1}; }
+  .environment-matrix-title { padding: 6px 10px 4px; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; font-weight: 600; text-transform: uppercase; }
+  .environment-matrix-scroll { overflow: auto; max-height: 130px; }
+  .environment-matrix { width: 100%; border-collapse: collapse; font-size: 9px; }
+  .environment-matrix th, .environment-matrix td { padding: 4px 7px; border-top: 1px solid ${(props) => props.theme.border.border1}; text-align: center; white-space: nowrap; }
+  .environment-matrix th:first-child, .environment-matrix td:first-child { position: sticky; left: 0; z-index: 1; background: ${(props) => props.theme.sidebar.bg}; text-align: left; }
+  .environment-matrix .present { color: ${(props) => props.theme.colors.text.green}; }
+  .environment-matrix .missing { color: ${(props) => props.theme.colors.text.danger}; }
+
+  .run-affected-backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0, 0, 0, 0.55); }
+  .run-affected-modal { width: min(620px, 100%); max-height: min(720px, 90vh); display: flex; flex-direction: column; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: ${(props) => props.theme.border.radius.base}; background: ${(props) => props.theme.background.base}; box-shadow: 0 20px 70px rgba(0, 0, 0, 0.35); }
+  .run-modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; }
+  .run-modal-header > div { display: flex; flex-direction: column; gap: 2px; }
+  .run-modal-header strong { font-size: 14px; }
+  .run-modal-header span { color: ${(props) => props.theme.colors.text.muted}; font-size: 10px; }
+  .run-modal-header button { border: 0; background: transparent; color: ${(props) => props.theme.text}; cursor: pointer; }
+  .run-env-field { display: flex; flex-direction: column; gap: 5px; padding: 12px 14px; }
+  .run-env-field > span { color: ${(props) => props.theme.colors.text.muted}; font-size: 10px; font-weight: 600; }
+  .run-env-field select { padding: 7px 9px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: ${(props) => props.theme.border.radius.base}; background: ${(props) => props.theme.sidebar.bg}; color: ${(props) => props.theme.text}; font-size: 11px; }
+  .run-modal-tools { display: flex; align-items: center; gap: 7px; padding: 0 14px 9px; }
+  .run-modal-tools button { border: 0; background: transparent; color: ${(props) => props.theme.primary.solid}; font-size: 10px; cursor: pointer; }
+  .run-modal-tools span { margin-left: auto; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .run-request-list { min-height: 80px; max-height: 360px; overflow: auto; border-top: 1px solid ${(props) => props.theme.border.border1}; border-bottom: 1px solid ${(props) => props.theme.border.border1}; }
+  .run-request-row { display: flex; align-items: center; gap: 9px; padding: 8px 14px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; cursor: pointer; }
+  .run-request-row > span { min-width: 0; display: flex; flex: 1; flex-direction: column; }
+  .run-request-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .run-request-row small { overflow: hidden; color: ${(props) => props.theme.colors.text.muted}; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+  .run-request-row .method { min-width: 46px; color: ${(props) => props.theme.primary.solid}; font-size: 9px; font-weight: 700; }
+  .run-request-row .method.side-effect { color: ${(props) => props.theme.colors.text.warning}; }
+  .run-side-effect-warning { display: flex; align-items: center; gap: 7px; padding: 9px 14px; color: ${(props) => props.theme.colors.text.warning}; font-size: 10px; }
+  .run-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 14px; border-top: 1px solid ${(props) => props.theme.border.border1}; }
+  .run-modal-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: ${(props) => props.theme.border.radius.base}; font-size: 10px; cursor: pointer; }
+  .run-modal-actions .secondary { border: 1px solid ${(props) => props.theme.border.border1}; background: transparent; color: ${(props) => props.theme.text}; }
+  .run-modal-actions .primary { border: 1px solid ${(props) => props.theme.primary.solid}; background: ${(props) => props.theme.primary.solid}; color: white; }
+  .run-modal-actions .primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .diff-file-header {
     flex: 0 0 auto;

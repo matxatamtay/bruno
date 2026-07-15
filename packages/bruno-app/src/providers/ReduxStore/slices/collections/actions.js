@@ -29,6 +29,7 @@ import { uuid, waitForNextTick } from 'utils/common';
 import { cancelNetworkRequest, connectWS, sendGrpcRequest, sendNetworkRequest, sendWsRequest } from 'utils/network/index';
 import { callIpc } from 'utils/common/ipc';
 import brunoClipboard from 'utils/bruno-clipboard';
+import { executeReplayScenario } from 'utils/replay-runner';
 
 import {
   collectionAddEnvFileEvent as _collectionAddEnvFileEvent,
@@ -527,6 +528,7 @@ export const wsConnectOnly = (item, collectionUid) => (dispatch, getState) => {
     let collectionCopy = cloneDeep(collection);
 
     const itemCopy = cloneDeep(item);
+    if (item?.__replayStudioLocalOnly) collectionCopy.__replayStudioLocalOnly = true;
 
     const requestUid = uuid();
     itemCopy.requestUid = requestUid;
@@ -677,6 +679,7 @@ export const sendRequest = (item, collectionUid) => (dispatch, getState) => {
         .then(resolve)
         .catch((err) => {
           toast.error(err.message);
+          if (itemCopy.__replayStudioLocalOnly) resolve();
         });
     } else if (isWsRequest) {
       const wsMessages = itemCopy.draft?.request?.body?.ws || itemCopy.request?.body?.ws || [];
@@ -685,6 +688,7 @@ export const sendRequest = (item, collectionUid) => (dispatch, getState) => {
         .then(resolve)
         .catch((err) => {
           toast.error(err.message);
+          if (itemCopy.__replayStudioLocalOnly) resolve();
         });
     } else {
       sendNetworkRequest(itemCopy, collectionCopy, environment, collectionCopy.runtimeVariables)
@@ -722,6 +726,7 @@ export const sendRequest = (item, collectionUid) => (dispatch, getState) => {
                 requestSent
               })
             );
+            if (itemCopy.__replayStudioLocalOnly) resolve();
             return;
           }
 
@@ -741,10 +746,20 @@ export const sendRequest = (item, collectionUid) => (dispatch, getState) => {
               requestSent
             })
           );
+          if (itemCopy.__replayStudioLocalOnly) resolve();
         });
     }
   });
 };
+
+export const runReplayScenario = (scenario, collectionUid, options = {}) => (dispatch, getState) => executeReplayScenario({
+  scenario,
+  collectionUid,
+  options,
+  dispatch,
+  getState,
+  sendRequestAction: sendRequest
+});
 
 export const cancelRequest = (cancelTokenUid, item, collection) => (dispatch) => {
   return cancelNetworkRequest(cancelTokenUid)

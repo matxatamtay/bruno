@@ -101,6 +101,11 @@ const StyledWrapper = styled.div`
     }
   }
 
+  .replay-usage-badge { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; color: ${(props) => props.theme.primary.solid}; font-size: 10px; }
+  .replay-usage-badge > button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; }
+  .replay-usage-badge label { display: inline-flex; align-items: center; gap: 3px; color: ${(props) => props.theme.colors.text.muted}; }
+  .replay-usage-badge select { max-width: 180px; border: 0; background: transparent; color: ${(props) => props.theme.colors.text.muted}; cursor: pointer; font-size: 9px; }
+
   div.graphql-docs-explorer-container {
     background: ${(props) => props.theme.requestTabPanel.graphqlDocsExplorer.bg};
     color: ${(props) => props.theme.requestTabPanel.graphqlDocsExplorer.color};

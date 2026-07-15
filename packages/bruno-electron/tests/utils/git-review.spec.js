@@ -7,6 +7,7 @@ const {
   getCommitFilesForCollection,
   getFileContentForVisualDiff
 } = require('../../src/utils/git');
+const { getCommitSemanticReview } = require('../../src/services/git-semantic-review/commit-review');
 
 const BEFORE_REQUEST = `meta {
   name: get-user
@@ -145,6 +146,22 @@ describe('Git commit review helpers', () => {
     });
     expect(renamedFile.oldPath.endsWith('collection/bruno.json')).toBe(true);
     expect(renamedFile.path.endsWith('collection/collection.json')).toBe(true);
+  });
+
+  test('returns a cached commit-level semantic review', async () => {
+    const history = await getCurrentBranchCommitHistory(repository.collectionPath, 20);
+    const result = await getCommitSemanticReview(repository.collectionPath, history.commits[0].hash);
+
+    expect(result.commitHash).toBe(history.commits[0].hash);
+    expect(result.comparedWith).toBe('first-parent');
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ruleId: 'request.method-changed', severity: 'breaking' }),
+      expect.objectContaining({ ruleId: 'request.url-changed', severity: 'breaking' })
+    ]));
+    expect(result.summary.breaking).toBeGreaterThanOrEqual(2);
+
+    const cached = await getCommitSemanticReview(repository.collectionPath, history.commits[0].hash);
+    expect(cached).toBe(result);
   });
 
   test('returns parsed before and after request snapshots for tabbed visual diffs', async () => {

@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useDispatch } from 'react-redux';
 import { IconGitBranch, IconLoader2, IconRefresh } from '@tabler/icons';
 import toast from 'react-hot-toast';
 import { formatIpcError } from 'utils/common/error';
 import GitRequestTree from './GitRequestTree';
 import GitRequestDiff from './GitRequestDiff';
 import StyledWrapper from './StyledWrapper';
+import SemanticReviewPanel from './SemanticReviewPanel';
+import RunAffectedModal from './RunAffectedModal';
+import { runCollectionFolder, selectEnvironment } from 'providers/ReduxStore/slices/collections/actions';
 
 const formatCommitDate = (value) => {
   if (!value) return '';
@@ -31,12 +35,31 @@ const invokeWithTimeout = (channel, payload, timeoutMs = 20000) => {
   ]).finally(() => clearTimeout(timeoutId));
 };
 
+const flattenItems = (items = [], output = []) => {
+  items.forEach((item) => {
+    output.push(item);
+    if (item.items?.length) flattenItems(item.items, output);
+  });
+  return output;
+};
+
+const toVariableList = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).map(([name, variableValue]) => ({ name, value: variableValue, enabled: true }));
+};
+
 const GitReview = ({ collection }) => {
+  const dispatch = useDispatch();
   const [history, setHistory] = useState({ branch: '', commits: [], hasMore: false });
   const [selectedCommit, setSelectedCommit] = useState(null);
   const [files, setFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileReview, setFileReview] = useState(null);
+  const [semanticReview, setSemanticReview] = useState(null);
+  const [runModalOpen, setRunModalOpen] = useState(false);
+  const [requestedTab, setRequestedTab] = useState(null);
+  const [isLoadingSemantic, setIsLoadingSemantic] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isLoadingCommit, setIsLoadingCommit] = useState(false);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
@@ -80,8 +103,26 @@ const GitReview = ({ collection }) => {
     setFiles([]);
     setSelectedFile(null);
     setFileReview(null);
+    setSemanticReview(null);
+    setRequestedTab(null);
     setIsLoadingFile(false);
     setIsLoadingCommit(true);
+    setIsLoadingSemantic(true);
+
+    invokeWithTimeout('renderer:get-commit-semantic-review', {
+      collectionPath: collection.pathname,
+      commitHash: commit.hash,
+      context: {
+        globalVariables: toVariableList(collection.globalEnvironmentVariables),
+        runtimeVariables: toVariableList(collection.runtimeVariables)
+      }
+    }, 60000).then((result) => {
+      if (token === commitRequestTokenRef.current) setSemanticReview(result);
+    }).catch((error) => {
+      if (token === commitRequestTokenRef.current) toast.error(formatIpcError(error) || 'Unable to analyze commit semantics');
+    }).finally(() => {
+      if (token === commitRequestTokenRef.current) setIsLoadingSemantic(false);
+    });
 
     try {
       const review = await invokeWithTimeout('renderer:get-commit-review', {
@@ -149,6 +190,33 @@ const GitReview = ({ collection }) => {
       }
     }
   }, [collection.pathname, selectCommit]);
+
+  const selectFinding = useCallback((finding) => {
+    const file = files.find((candidate) => candidate.collectionRelativePath === finding.filePath);
+    setRequestedTab(finding.section === 'assertions' ? 'assertions' : finding.section);
+    if (file) void loadFileReview(selectedCommit, file);
+  }, [files, loadFileReview, selectedCommit]);
+
+  const runAffected = useCallback(() => {
+    if (!semanticReview?.affectedRequests?.length) return;
+    setRunModalOpen(true);
+  }, [semanticReview]);
+
+  const executeAffected = useCallback(async ({ environmentUid, paths }) => {
+    const items = flattenItems(collection.items || []);
+    const selected = items.filter((item) => paths.includes(String(item.pathname || '').replace(`${collection.pathname}/`, '')));
+    if (!selected.length) {
+      toast.error('Affected requests are not available in the current working tree');
+      return;
+    }
+    try {
+      await dispatch(selectEnvironment(environmentUid, collection.uid));
+      await dispatch(runCollectionFolder(collection.uid, null, true, 0, [], selected.map((item) => item.uid)));
+      setRunModalOpen(false);
+    } catch (error) {
+      toast.error(formatIpcError(error) || 'Unable to run affected requests');
+    }
+  }, [collection, dispatch]);
 
   useEffect(() => {
     void loadHistory();
@@ -219,19 +287,36 @@ const GitReview = ({ collection }) => {
               selectedFile={selectedFile}
               commitHash={selectedCommit?.hash}
               onSelectFile={(file) => loadFileReview(selectedCommit, file)}
+              impactedPaths={(semanticReview?.affectedRequests || []).map((request) => request.path)}
             />
           )}
         </section>
 
         <main className="diff-column">
+          <SemanticReviewPanel
+            review={semanticReview}
+            loading={isLoadingSemantic}
+            onSelectFinding={selectFinding}
+            onRunAffected={runAffected}
+          />
           <GitRequestDiff
             commit={selectedCommit}
             file={selectedFile}
             review={fileReview}
             loading={isLoadingFile}
+            requestedTab={requestedTab}
           />
         </main>
       </div>
+      {runModalOpen && (
+        <RunAffectedModal
+          affectedRequests={semanticReview?.affectedRequests || []}
+          environments={collection.environments || []}
+          activeEnvironmentUid={collection.activeEnvironmentUid}
+          onClose={() => setRunModalOpen(false)}
+          onRun={executeAffected}
+        />
+      )}
     </StyledWrapper>
   );
 };

@@ -50,6 +50,7 @@ import { clampRequestHeightForResponse } from './paneSize';
 import { IconLoader2 } from '@tabler/icons';
 import GitReview from 'components/Git/GitReview';
 import WebRecorder from 'components/WebRecorder';
+import ReplayUsageBadge from './ReplayUsageBadge';
 
 const MIN_LEFT_PANE_WIDTH = 300;
 const MIN_RIGHT_PANE_WIDTH = 490;
@@ -455,7 +456,7 @@ const RequestTabPanel = () => {
   }
 
   if (focusedTab.type === 'web-recorder') {
-    return <WebRecorder collection={collection} />;
+    return <WebRecorder collection={collection} initialScenarioId={focusedTab.replayScenarioId || null} />;
   }
 
   if (focusedTab.type === 'response-example') {
@@ -674,6 +675,7 @@ const RequestTabPanel = () => {
         } ${requestPaneCollapsed ? 'request-collapsed' : ''} ${responsePaneCollapsed ? 'response-collapsed' : ''}`}
       >
         <div className="query-url-wrapper pt-3 pb-4 px-4">
+          <ReplayUsageBadge collection={collection} item={item} />
           {renderQueryUrl()}
         </div>
         <section ref={mainSectionRef} className={`main flex ${isVerticalLayout ? 'flex-col' : ''} flex-grow relative overflow-auto`}>

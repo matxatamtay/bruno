@@ -13,6 +13,29 @@ const ALLOWED_EVENT_TYPES = new Set([
   'recorder', 'action', 'navigation', 'network-request', 'network-response',
   'network-failed', 'console', 'screenshot', 'marker'
 ]);
+const SENSITIVE_FIELD = /authorization|cookie|token|secret|password|passwd|api[_-]?key|session|otp|pin|cvv|cvc/i;
+
+const parseMaybeJson = (value) => {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try { return JSON.parse(value); } catch { return null; }
+};
+
+const normalizeSensitiveValue = (pathName, value) => {
+  const text = String(value || '').trim();
+  if (/headers\.authorization$/i.test(pathName)) return text.replace(/^(?:Bearer|Basic|Token)\s+/i, '').trim();
+  return text;
+};
+
+const collectSensitiveValues = (value, prefix = '', output = []) => {
+  if (Array.isArray(value)) value.forEach((item, index) => collectSensitiveValues(item, `${prefix}[${index}]`, output));
+  else if (value && typeof value === 'object') Object.entries(value).forEach(([key, child]) => {
+    const next = prefix ? `${prefix}.${key}` : key;
+    if (SENSITIVE_FIELD.test(key) && ['string', 'number'].includes(typeof child)) output.push({ path: next, value: String(child) });
+    else collectSensitiveValues(child, next, output);
+  });
+  return output;
+};
 
 const jsonResponse = (response, statusCode, value) => {
   response.writeHead(statusCode, {
@@ -53,6 +76,7 @@ class RecorderManager {
     this.server = null;
     this.port = null;
     this.token = crypto.randomBytes(24).toString('hex');
+    this.fingerprintKey = crypto.randomBytes(32);
     this.activeSession = null;
     this.requestMatches = new Map();
     this.store = new RecorderSessionStore(path.join(app.getPath('userData'), 'recordings'));
@@ -134,6 +158,28 @@ class RecorderManager {
     return this.getState();
   }
 
+  sensitiveFingerprints(rawEvent) {
+    const data = rawEvent?.data || {};
+    const values = [];
+    Object.entries(data.headers || {}).forEach(([key, value]) => {
+      if (SENSITIVE_FIELD.test(key) && value != null) values.push({ path: `headers.${key}`, value: String(value) });
+    });
+    const parsedBody = parseMaybeJson(data.body);
+    if (parsedBody) collectSensitiveValues(parsedBody, 'body', values);
+    try {
+      const url = new URL(data.url || '');
+      url.searchParams.forEach((value, key) => {
+        if (SENSITIVE_FIELD.test(key)) values.push({ path: `query.${key}`, value });
+      });
+    } catch {}
+    return values.map((entry) => ({ ...entry, value: normalizeSensitiveValue(entry.path, entry.value) }))
+      .filter((entry) => entry.value && entry.value !== '<redacted>')
+      .map((entry) => ({
+        path: entry.path,
+        fingerprint: crypto.createHmac('sha256', this.fingerprintKey).update(entry.value).digest('hex')
+      }));
+  }
+
   normalizeEvent(rawEvent) {
     if (!rawEvent || typeof rawEvent !== 'object') return null;
     const type = ALLOWED_EVENT_TYPES.has(rawEvent.type) ? rawEvent.type : 'marker';
@@ -149,6 +195,8 @@ class RecorderManager {
       frameId: rawEvent.frameId ?? null,
       data: rawEvent.data && typeof rawEvent.data === 'object' ? rawEvent.data : {}
     });
+    const sensitiveFingerprints = this.sensitiveFingerprints(rawEvent);
+    if (sensitiveFingerprints.length) sanitized.data.sensitiveFingerprints = sensitiveFingerprints;
     if (screenshotBase64) sanitized.data.base64 = screenshotBase64;
     return sanitized;
   }
@@ -248,3 +296,4 @@ class RecorderManager {
 }
 
 module.exports = RecorderManager;
+module.exports.normalizeSensitiveValue = normalizeSensitiveValue;

@@ -13,6 +13,7 @@ const {
   getFileContentForVisualDiff
 } = require('../utils/git');
 const { createDirectory, removeDirectory } = require('../utils/filesystem');
+const { getCommitSemanticReview } = require('../services/git-semantic-review/commit-review');
 
 const getGitOperationContext = async (collectionPath) => {
   if (!collectionPath) {
@@ -127,6 +128,12 @@ const registerGitIpc = (mainWindow) => {
     await getGitOperationContext(collectionPath);
     const files = await getCommitFilesForCollection(collectionPath, commitHash);
     return { commitHash, files };
+  });
+
+  ipcMain.handle('renderer:get-commit-semantic-review', async (event, { collectionPath, commitHash, context = {} }) => {
+    if (!commitHash) throw new Error('Commit hash is required');
+    await getGitOperationContext(collectionPath);
+    return getCommitSemanticReview(collectionPath, commitHash, context);
   });
 
   ipcMain.handle('renderer:get-commit-file-review', async (event, { collectionPath, commitHash, filePath, oldFilePath }) => {

@@ -152,6 +152,72 @@ const StyledWrapper = styled.div`
   .match-card strong { display: block; margin-bottom: 3px; font-size: 11px; }
   .match-card span { display: block; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; margin-bottom: 7px; }
 
+  .studio-mode-tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 7px; background: ${(props) => props.theme.sidebar.bg}; }
+  .studio-mode-tabs button { padding: 5px 9px; border: 0; border-radius: 5px; background: transparent; color: ${(props) => props.theme.colors.text.muted}; cursor: pointer; font-size: 10px; }
+  .studio-mode-tabs button.active { color: ${(props) => props.theme.text}; background: ${(props) => props.theme.background.base}; box-shadow: 0 1px 4px rgba(0,0,0,.16); }
+
+  .replay-studio-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(240px, 310px) minmax(0, 1fr); overflow: hidden; }
+  .replay-scenario-list { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid ${(props) => props.theme.border.border1}; background: ${(props) => props.theme.sidebar.bg}; }
+  .replay-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; }
+  .replay-scenario-row { width: 100%; display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; border: 0; border-bottom: 1px solid ${(props) => props.theme.border.border1}; background: transparent; color: ${(props) => props.theme.text}; text-align: left; cursor: pointer; }
+  .replay-scenario-row:hover { background: ${(props) => props.theme.sidebar.collection.item.hoverBg}; }
+  .replay-scenario-row.selected { box-shadow: inset 3px 0 0 ${(props) => props.theme.primary.solid}; background: color-mix(in srgb, ${(props) => props.theme.primary.solid} 10%, transparent); }
+  .replay-scenario-row strong { font-size: 11px; }
+  .replay-scenario-row span { color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .replay-editor { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .replay-editor-header { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 9px 11px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; }
+  .replay-editor-header input { flex: 1; min-width: 180px; padding: 6px 8px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 5px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; }
+  .replay-editor-header select { min-height: 30px; padding: 4px 7px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 5px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; }
+  .replay-local-note { padding: 7px 11px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .replay-divergence { display: flex; align-items: center; gap: 6px; padding: 8px 11px; color: ${(props) => props.theme.colors.text.warning}; background: color-mix(in srgb, ${(props) => props.theme.colors.text.warning} 10%, transparent); border-bottom: 1px solid ${(props) => props.theme.border.border1}; font-size: 10px; }
+  .replay-editor-tabs { display: flex; gap: 3px; padding: 6px 10px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; background: ${(props) => props.theme.sidebar.bg}; }
+  .replay-editor-tabs button { padding: 5px 9px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: ${(props) => props.theme.colors.text.muted}; cursor: pointer; font-size: 10px; }
+  .replay-editor-tabs button.active { border-color: ${(props) => props.theme.border.border1}; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; }
+  .replay-step-list { flex: 1; min-height: 0; overflow: auto; }
+  .replay-step { display: grid; grid-template-columns: 18px auto 24px minmax(0,1fr) auto auto; gap: 8px; align-items: center; padding: 9px 11px; border-bottom: 1px solid ${(props) => props.theme.border.border1}; }
+  .replay-step.dragging { opacity: .45; background: color-mix(in srgb, ${(props) => props.theme.primary.solid} 10%, transparent); }
+  .replay-drag-handle { color: ${(props) => props.theme.colors.text.muted}; cursor: grab; user-select: none; font-size: 14px; letter-spacing: -3px; }
+  .replay-drag-handle:active { cursor: grabbing; }
+  .replay-step.broken { background: color-mix(in srgb, ${(props) => props.theme.colors.text.danger} 8%, transparent); }
+  .replay-step.stale { box-shadow: inset 3px 0 0 ${(props) => props.theme.colors.text.warning}; }
+  .replay-relink { max-width: 180px; min-height: 30px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 5px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; font-size: 9px; }
+  .replay-step-index { color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .replay-step-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .replay-step-copy input { border: 0; background: transparent; color: ${(props) => props.theme.text}; font-weight: 600; font-size: 11px; }
+  .replay-step-copy span, .replay-step-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .replay-attempt-trace { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .replay-attempt-trace span { padding: 2px 5px; border-radius: 999px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.colors.text.muted}; font-size: 8px; }
+  .replay-attempt-trace span.passed { color: ${(props) => props.theme.colors.text.green}; }
+  .replay-attempt-trace span.failed { color: ${(props) => props.theme.colors.text.danger}; }
+  .replay-attempt-trace span.waiting { color: ${(props) => props.theme.colors.text.warning}; }
+  .replay-policy-row { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; margin-top: 5px; padding: 6px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 5px; background: ${(props) => props.theme.sidebar.bg}; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .replay-policy-row label, .replay-policy-row span { display: inline-flex; align-items: center; gap: 4px; }
+  .replay-policy-row input[type='number'] { width: 58px; min-width: 0; padding: 3px 4px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 4px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; font-size: 9px; }
+  .replay-policy-row select, .replay-condition-path, .replay-condition-value { min-height: 24px; padding: 2px 5px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 4px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; font-size: 9px; }
+  .replay-condition-path { width: 120px; }
+  .replay-condition-value { width: 85px; }
+  .replay-run-status { min-width: 50px; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; text-transform: uppercase; }
+  .replay-run-status.passed { color: ${(props) => props.theme.colors.text.green}; }
+  .replay-run-status.failed, .replay-run-status.missing-link { color: ${(props) => props.theme.colors.text.danger}; }
+  .replay-run-summary { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 9px 11px; border-top: 1px solid ${(props) => props.theme.border.border1}; background: ${(props) => props.theme.sidebar.bg}; font-size: 10px; }
+  .replay-run-summary span { color: ${(props) => props.theme.colors.text.muted}; }
+  .replay-dependency-graph { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+  .replay-graph-nodes { display: flex; align-items: stretch; gap: 8px; overflow-x: auto; padding-bottom: 14px; }
+  .replay-graph-sequence-arrow { display: flex; align-items: center; color: ${(props) => props.theme.colors.text.muted}; font-size: 18px; }
+  .replay-graph-node { position: relative; min-width: 170px; max-width: 220px; display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 7px; background: ${(props) => props.theme.sidebar.bg}; box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+  .replay-graph-node.authentication { border-color: color-mix(in srgb, ${(props) => props.theme.primary.solid} 55%, ${(props) => props.theme.border.border1}); }
+  .replay-graph-node.polling { border-style: dashed; }
+  .replay-graph-node.upload { border-color: ${(props) => props.theme.colors.text.warning}; }
+  .replay-graph-node strong { font-size: 11px; }
+  .replay-graph-node small { color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+  .replay-graph-node code { width: fit-content; padding: 2px 5px; border-radius: 999px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.primary.solid}; font-size: 8px; }
+  .replay-graph-index { position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: ${(props) => props.theme.primary.solid}; color: white; font-size: 9px; }
+  .replay-graph-edges { display: flex; flex-direction: column; gap: 6px; padding-top: 12px; border-top: 1px solid ${(props) => props.theme.border.border1}; }
+  .replay-graph-edges > strong { font-size: 11px; }
+  .replay-graph-edge { display: grid; grid-template-columns: minmax(100px,1fr) auto minmax(100px,1fr) auto; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 5px; font-size: 9px; }
+  .replay-graph-edge code { color: ${(props) => props.theme.primary.solid}; font-weight: 700; }
+  .replay-graph-edge small, .replay-graph-empty { color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; }
+
   @media (max-width: 1050px) {
     .recorder-grid { grid-template-columns: minmax(230px, 300px) minmax(360px, 1fr); }
     .details-column { display: none; }

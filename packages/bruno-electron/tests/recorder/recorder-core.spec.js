@@ -5,6 +5,7 @@ const AdmZip = require('adm-zip');
 const { redactRecorderEvent } = require('../../src/recorder/redaction');
 const { matchCollectionRequest } = require('../../src/recorder/matcher');
 const { RecorderSessionStore, isSafeArchivePath } = require('../../src/recorder/session-store');
+const { normalizeSensitiveValue } = require('../../src/recorder/RecorderManager');
 
 describe('Bruno Web Recorder core', () => {
   describe('redaction', () => {
@@ -47,6 +48,13 @@ describe('Bruno Web Recorder core', () => {
       expect(event.data.body).toContain('"password":"<redacted>"');
       expect(event.data.body).toContain('"api_key":"<redacted>"');
       expect(event.data.body).not.toContain('"password":"secret"');
+    });
+  });
+
+  describe('sensitive fingerprints', () => {
+    it('normalizes authorization schemes before fingerprinting', () => {
+      expect(normalizeSensitiveValue('headers.Authorization', 'Bearer token-123')).toBe('token-123');
+      expect(normalizeSensitiveValue('body.accessToken', 'token-123')).toBe('token-123');
     });
   });
 

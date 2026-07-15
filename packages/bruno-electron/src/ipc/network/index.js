@@ -515,6 +515,7 @@ const registerNetworkIpc = (mainWindow) => {
   };
 
   const sendVariableUpdates = (result, { collectionUid, requestUid, collection }) => {
+    if (collection?.__replayStudioLocalOnly) return;
     if (result.runtimeVariables) {
       mainWindow.webContents.send('main:runtime-variables-update', {
         runtimeVariables: result.runtimeVariables,

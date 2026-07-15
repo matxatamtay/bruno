@@ -85,7 +85,7 @@ const CONFIG = [
   { key: 'settings', label: 'Settings', Component: SettingsDiff, select: (data) => ({ tags: get(data, 'tags', []), settings: get(data, 'settings', {}), app: get(data, 'app', {}) }) }
 ];
 
-const GitRequestDiff = ({ commit, file, review, loading }) => {
+const GitRequestDiff = ({ commit, file, review, loading, requestedTab }) => {
   const oldParsed = review?.oldParsed || null;
   const newParsed = review?.newParsed || null;
   const isStructured = Boolean(oldParsed || newParsed);
@@ -115,9 +115,10 @@ const GitRequestDiff = ({ commit, file, review, loading }) => {
   const [activeTab, setActiveTab] = useState('request');
 
   useEffect(() => {
+    const requested = requestedTab && tabs.find((tab) => tab.key === requestedTab);
     const firstChanged = tabs.find((tab) => tab.changed) || tabs[0];
-    setActiveTab(firstChanged?.key || 'raw');
-  }, [file?.path, commit?.hash, tabs]);
+    setActiveTab(requested?.key || firstChanged?.key || 'raw');
+  }, [file?.path, commit?.hash, requestedTab, tabs]);
 
   const currentTab = tabs.find((tab) => tab.key === activeTab) || tabs[0];
   const sections = useMemo(() => currentTab ? [{

@@ -28,7 +28,7 @@ const flattenPaths = (items = [], result = new Set()) => {
   return result;
 };
 
-const GitRequestTree = ({ collection, files, selectedFile, commitHash, onSelectFile }) => {
+const GitRequestTree = ({ collection, files, selectedFile, commitHash, onSelectFile, impactedPaths = [] }) => {
   const [expandedOverrides, setExpandedOverrides] = useState({});
 
   useEffect(() => {
@@ -44,6 +44,7 @@ const GitRequestTree = ({ collection, files, selectedFile, commitHash, onSelectF
     return map;
   }, [files]);
 
+  const impactedSet = useMemo(() => new Set(impactedPaths.map(normalizePath)), [impactedPaths]);
   const allCurrentPaths = useMemo(() => flattenPaths(collection.items), [collection.items]);
   const unmatchedFiles = useMemo(() => files.filter((file) => {
     const current = normalizePath(file.absolutePath);
@@ -74,6 +75,8 @@ const GitRequestTree = ({ collection, files, selectedFile, commitHash, onSelectF
     const hasOverride = Object.prototype.hasOwnProperty.call(expandedOverrides, itemPath);
     const expanded = isFolder && (hasOverride ? expandedOverrides[itemPath] : folderChanged ? true : !item.collapsed);
     const selected = changedFile && selectedFile?.path === changedFile.path && (selectedFile?.oldPath || selectedFile?.path) === (changedFile.oldPath || changedFile.path);
+    const collectionRelative = itemPath.startsWith(`${normalizePath(collection.pathname)}/`) ? itemPath.slice(normalizePath(collection.pathname).length + 1) : itemPath;
+    const impacted = impactedSet.has(collectionRelative);
 
     if (isFolder) {
       const count = folderChanged ? changedDescendantCount(itemPath) : 0;
@@ -99,7 +102,7 @@ const GitRequestTree = ({ collection, files, selectedFile, commitHash, onSelectF
       <button
         type="button"
         key={item.uid || itemPath}
-        className={`tree-row request-row ${changedFile ? `changed ${changedFile.status}` : ''} ${selected ? 'selected' : ''}`}
+        className={`tree-row request-row ${changedFile ? `changed ${changedFile.status}` : ''} ${impacted ? 'impacted' : ''} ${selected ? 'selected' : ''}`}
         style={{ paddingLeft: 26 + level * 16 }}
         onClick={() => changedFile && onSelectFile(changedFile)}
         disabled={!changedFile}
@@ -107,6 +110,7 @@ const GitRequestTree = ({ collection, files, selectedFile, commitHash, onSelectF
       >
         <CollectionItemIcon item={item} />
         <span className="tree-name">{item.name}</span>
+        {impacted && !changedFile && <span className="impact-badge">⚡</span>}
         {changedFile && <span className={`change-badge ${changedFile.status}`}>{statusLetter(changedFile.status)}</span>}
       </button>
     );

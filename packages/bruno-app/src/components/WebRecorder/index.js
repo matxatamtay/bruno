@@ -24,6 +24,7 @@ import {
 } from 'providers/ReduxStore/slices/recorder';
 import { findItemInCollection, flattenItems } from 'utils/collections';
 import StyledWrapper from './StyledWrapper';
+import ReplayStudioPanel from './ReplayStudioPanel';
 
 const REQUEST_TYPES = new Set(['http-request', 'graphql-request', 'grpc-request', 'ws-request']);
 
@@ -78,13 +79,14 @@ const stringify = (value) => {
   return JSON.stringify(value, null, 2);
 };
 
-const WebRecorder = ({ collection }) => {
+const WebRecorder = ({ collection, initialScenarioId = null }) => {
   const dispatch = useDispatch();
   const recorder = useSelector((state) => state.recorder);
   const [isBusy, setIsBusy] = useState(false);
   const [extensionPath, setExtensionPath] = useState('');
   const [assetUrl, setAssetUrl] = useState(null);
   const [detailTab, setDetailTab] = useState('overview');
+  const [studioMode, setStudioMode] = useState(initialScenarioId ? 'scenarios' : 'recordings');
 
   const selectedSessionId = recorder.selectedSessionId || recorder.activeSession?.id;
   const events = recorder.eventsBySession[selectedSessionId] || [];
@@ -263,9 +265,13 @@ const WebRecorder = ({ collection }) => {
         <div className="title-block">
           <IconActivity size={20} strokeWidth={1.5} />
           <div className="title-copy">
-            <strong>Web Recorder</strong>
-            <span>{collection.name} · action, network, console and screenshot flight recorder</span>
+            <strong>Replay Studio</strong>
+            <span>{collection.name} · record, link, replay and compare API scenarios locally</span>
           </div>
+        </div>
+        <div className="studio-mode-tabs">
+          <button className={studioMode === 'recordings' ? 'active' : ''} onClick={() => setStudioMode('recordings')}>Recordings</button>
+          <button className={studioMode === 'scenarios' ? 'active' : ''} onClick={() => setStudioMode('scenarios')}>Scenarios</button>
         </div>
         <div className="header-actions">
           <select className="session-select" value={selectedSessionId || ''} onChange={(event) => loadSession(event.target.value)}>
@@ -284,114 +290,120 @@ const WebRecorder = ({ collection }) => {
         </div>
       </div>
 
-      <div className="pairing-bar">
-        <div className="pairing-row">
-          <span className="pairing-help">Chrome extension:</span>
-          <code>{extensionPath || 'Loading extension path…'}</code>
-          <button className="button" onClick={() => window.ipcRenderer.invoke('renderer:recorder:reveal-extension')}><IconFolder size={13} /> Reveal</button>
-        </div>
-        <div className="pairing-row">
-          <span>Port <code>{recorder.bridge.port || '…'}</code></span>
-          <span>Token <code className="pairing-token">{recorder.bridge.token || '…'}</code></span>
-          <button className="button" disabled={!recorder.bridge.token} onClick={copyPairing}><IconCopy size={13} /> Copy</button>
-        </div>
-      </div>
-
-      <div className="recorder-grid">
-        <section className="timeline-column">
-          <div className="column-title"><span>Steps</span><small>{timelineEvents.length} events</small></div>
-          {timelineEvents.length ? (
-            <div className="timeline-list">
-              {timelineEvents.map((event, index) => (
-                <button
-                  key={event.id}
-                  className={`timeline-row ${event.id === selectedEvent?.id ? 'selected' : ''} ${hasEventError(event) ? 'error' : ''}`}
-                  onClick={() => dispatch(selectRecorderEvent(event.id))}
-                >
-                  <span className="step-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className="step-copy">
-                    <span className={`step-badge ${hasEventError(event) ? 'error' : ''}`}>{event.type}</span>
-                    <strong>{eventTitle(event)}</strong>
-                    <span>{eventSubtitle(event)}</span>
-                  </span>
-                  <span className="step-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
-                </button>
-              ))}
+      {studioMode === 'scenarios' ? (
+        <ReplayStudioPanel collection={collection} selectedSessionId={selectedSessionId} initialScenarioId={initialScenarioId} />
+      ) : (
+        <>
+          <div className="pairing-bar">
+            <div className="pairing-row">
+              <span className="pairing-help">Chrome extension:</span>
+              <code>{extensionPath || 'Loading extension path…'}</code>
+              <button className="button" onClick={() => window.ipcRenderer.invoke('renderer:recorder:reveal-extension')}><IconFolder size={13} /> Reveal</button>
             </div>
-          ) : (
-            <div className="empty-state">
-              <IconPlayerRecord size={36} strokeWidth={1} />
-              <strong>No recorded steps yet</strong>
-              <span>Start here, then paste the pairing token into the unpacked Chrome extension and attach it to the web page.</span>
+            <div className="pairing-row">
+              <span>Port <code>{recorder.bridge.port || '…'}</code></span>
+              <span>Token <code className="pairing-token">{recorder.bridge.token || '…'}</code></span>
+              <button className="button" disabled={!recorder.bridge.token} onClick={copyPairing}><IconCopy size={13} /> Copy</button>
             </div>
-          )}
-        </section>
-
-        <section className="viewport-column">
-          <div className="column-title"><span>Page at this step</span><small>{selectedEvent ? eventTitle(selectedEvent) : 'No step selected'}</small></div>
-          <div className="viewport-stage">
-            {assetUrl ? <img className="screenshot" src={assetUrl} alt="Recorded browser step" /> : (
-              <div className="empty-state">
-                <IconPhoto size={42} strokeWidth={1} />
-                <strong>{selectedEvent ? 'No screenshot linked to this step' : 'Select a step'}</strong>
-                <span>Screenshots are captured after actions, navigation and runtime errors while the extension remains attached.</span>
-              </div>
-            )}
           </div>
-        </section>
 
-        <section className="details-column">
-          <div className="column-title"><span>Step details</span>{hasEventError(selectedEvent) && <IconAlertTriangle size={14} />}</div>
-          <div className="detail-tabs">
-            {['overview', 'request', 'response', 'raw'].map((tab) => (
-              <button key={tab} className={`detail-tab ${detailTab === tab ? 'active' : ''}`} onClick={() => setDetailTab(tab)}>{tab}</button>
-            ))}
-          </div>
-          <div className="details-scroll">
-            {!selectedEvent ? <div className="empty-state"><strong>No step selected</strong></div> : null}
-
-            {selectedEvent && detailTab === 'overview' && (
-              <>
-                <div className="detail-section">
-                  <h4>Step</h4>
-                  <div className="status-line"><span className="step-badge">{selectedEvent.type}</span><strong>{eventTitle(selectedEvent)}</strong></div>
-                  <div className="url">{selectedEvent.data?.url || selectedEvent.data?.frameUrl || ''}</div>
+          <div className="recorder-grid">
+            <section className="timeline-column">
+              <div className="column-title"><span>Steps</span><small>{timelineEvents.length} events</small></div>
+              {timelineEvents.length ? (
+                <div className="timeline-list">
+                  {timelineEvents.map((event, index) => (
+                    <button
+                      key={event.id}
+                      className={`timeline-row ${event.id === selectedEvent?.id ? 'selected' : ''} ${hasEventError(event) ? 'error' : ''}`}
+                      onClick={() => dispatch(selectRecorderEvent(event.id))}
+                    >
+                      <span className="step-index">{String(index + 1).padStart(2, '0')}</span>
+                      <span className="step-copy">
+                        <span className={`step-badge ${hasEventError(event) ? 'error' : ''}`}>{event.type}</span>
+                        <strong>{eventTitle(event)}</strong>
+                        <span>{eventSubtitle(event)}</span>
+                      </span>
+                      <span className="step-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
+                    </button>
+                  ))}
                 </div>
-                {match && (
-                  <div className="detail-section match-card">
-                    <strong>{match.confidence === 'exact' ? 'Matched request' : 'Probable request'} · {match.name || match.pathname}</strong>
-                    <span>{match.method} {match.url} · score {match.score}</span>
-                    <button className="button" onClick={openMatchedRequest}><IconExternalLink size={13} /> Open in Bruno</button>
+              ) : (
+                <div className="empty-state">
+                  <IconPlayerRecord size={36} strokeWidth={1} />
+                  <strong>No recorded steps yet</strong>
+                  <span>Start here, then paste the pairing token into the unpacked Chrome extension and attach it to the web page.</span>
+                </div>
+              )}
+            </section>
+
+            <section className="viewport-column">
+              <div className="column-title"><span>Page at this step</span><small>{selectedEvent ? eventTitle(selectedEvent) : 'No step selected'}</small></div>
+              <div className="viewport-stage">
+                {assetUrl ? <img className="screenshot" src={assetUrl} alt="Recorded browser step" /> : (
+                  <div className="empty-state">
+                    <IconPhoto size={42} strokeWidth={1} />
+                    <strong>{selectedEvent ? 'No screenshot linked to this step' : 'Select a step'}</strong>
+                    <span>Screenshots are captured after actions, navigation and runtime errors while the extension remains attached.</span>
                   </div>
                 )}
-                <div className="detail-section"><h4>Captured data</h4><pre>{stringify(selectedEvent.data)}</pre></div>
-              </>
-            )}
+              </div>
+            </section>
 
-            {selectedEvent && detailTab === 'request' && (
-              requestEvent ? (
-                <>
-                  <div className="detail-section"><h4>Request</h4><div className="status-line"><strong>{requestEvent.data?.method}</strong><span className="url">{requestEvent.data?.url}</span></div></div>
-                  <div className="detail-section"><h4>Headers</h4><pre>{stringify(requestEvent.data?.headers)}</pre></div>
-                  <div className="detail-section"><h4>Body</h4><pre>{stringify(requestEvent.data?.body)}</pre></div>
-                </>
-              ) : <div className="empty-state"><strong>No request linked to this step</strong></div>
-            )}
+            <section className="details-column">
+              <div className="column-title"><span>Step details</span>{hasEventError(selectedEvent) && <IconAlertTriangle size={14} />}</div>
+              <div className="detail-tabs">
+                {['overview', 'request', 'response', 'raw'].map((tab) => (
+                  <button key={tab} className={`detail-tab ${detailTab === tab ? 'active' : ''}`} onClick={() => setDetailTab(tab)}>{tab}</button>
+                ))}
+              </div>
+              <div className="details-scroll">
+                {!selectedEvent ? <div className="empty-state"><strong>No step selected</strong></div> : null}
 
-            {selectedEvent && detailTab === 'response' && (
-              responseEvent ? (
-                <>
-                  <div className="detail-section"><h4>Response</h4><div className="status-line"><span className={`status-code ${Number(responseEvent.data?.status) >= 400 ? 'error' : ''}`}>{responseEvent.data?.status}</span><span>{responseEvent.data?.duration}ms</span></div><div className="url">{responseEvent.data?.url}</div></div>
-                  <div className="detail-section"><h4>Headers</h4><pre>{stringify(responseEvent.data?.headers)}</pre></div>
-                  <div className="detail-section"><h4>Body</h4><pre>{stringify(responseEvent.data?.body || responseEvent.data?.bodyOmitted)}</pre></div>
-                </>
-              ) : <div className="empty-state"><strong>No response linked to this step</strong></div>
-            )}
+                {selectedEvent && detailTab === 'overview' && (
+                  <>
+                    <div className="detail-section">
+                      <h4>Step</h4>
+                      <div className="status-line"><span className="step-badge">{selectedEvent.type}</span><strong>{eventTitle(selectedEvent)}</strong></div>
+                      <div className="url">{selectedEvent.data?.url || selectedEvent.data?.frameUrl || ''}</div>
+                    </div>
+                    {match && (
+                      <div className="detail-section match-card">
+                        <strong>{match.confidence === 'exact' ? 'Matched request' : 'Probable request'} · {match.name || match.pathname}</strong>
+                        <span>{match.method} {match.url} · score {match.score}</span>
+                        <button className="button" onClick={openMatchedRequest}><IconExternalLink size={13} /> Open in Bruno</button>
+                      </div>
+                    )}
+                    <div className="detail-section"><h4>Captured data</h4><pre>{stringify(selectedEvent.data)}</pre></div>
+                  </>
+                )}
 
-            {selectedEvent && detailTab === 'raw' && <pre>{stringify(selectedEvent)}</pre>}
+                {selectedEvent && detailTab === 'request' && (
+                  requestEvent ? (
+                    <>
+                      <div className="detail-section"><h4>Request</h4><div className="status-line"><strong>{requestEvent.data?.method}</strong><span className="url">{requestEvent.data?.url}</span></div></div>
+                      <div className="detail-section"><h4>Headers</h4><pre>{stringify(requestEvent.data?.headers)}</pre></div>
+                      <div className="detail-section"><h4>Body</h4><pre>{stringify(requestEvent.data?.body)}</pre></div>
+                    </>
+                  ) : <div className="empty-state"><strong>No request linked to this step</strong></div>
+                )}
+
+                {selectedEvent && detailTab === 'response' && (
+                  responseEvent ? (
+                    <>
+                      <div className="detail-section"><h4>Response</h4><div className="status-line"><span className={`status-code ${Number(responseEvent.data?.status) >= 400 ? 'error' : ''}`}>{responseEvent.data?.status}</span><span>{responseEvent.data?.duration}ms</span></div><div className="url">{responseEvent.data?.url}</div></div>
+                      <div className="detail-section"><h4>Headers</h4><pre>{stringify(responseEvent.data?.headers)}</pre></div>
+                      <div className="detail-section"><h4>Body</h4><pre>{stringify(responseEvent.data?.body || responseEvent.data?.bodyOmitted)}</pre></div>
+                    </>
+                  ) : <div className="empty-state"><strong>No response linked to this step</strong></div>
+                )}
+
+                {selectedEvent && detailTab === 'raw' && <pre>{stringify(selectedEvent)}</pre>}
+              </div>
+            </section>
           </div>
-        </section>
-      </div>
+        </>
+      )}
     </StyledWrapper>
   );
 };

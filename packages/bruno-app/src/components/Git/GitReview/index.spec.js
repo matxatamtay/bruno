@@ -3,10 +3,13 @@ import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 
 jest.mock('react-hot-toast', () => ({ error: jest.fn() }));
+jest.mock('react-redux', () => ({ useDispatch: () => jest.fn() }));
 jest.mock('utils/common/error', () => ({ formatIpcError: (error) => error?.message || '' }));
 jest.mock('./StyledWrapper', () => ({ children }) => <div>{children}</div>);
 jest.mock('./GitRequestTree', () => ({ files }) => <div data-testid="request-tree">{files.length} files</div>);
 jest.mock('./GitRequestDiff', () => ({ loading }) => <div data-testid="request-diff">{loading ? 'diff loading' : 'diff ready'}</div>);
+jest.mock('./SemanticReviewPanel', () => () => <div data-testid="semantic-review" />);
+jest.mock('./RunAffectedModal', () => () => <div data-testid="run-affected-modal" />);
 
 import GitReview from './index';
 
@@ -43,6 +46,9 @@ describe('GitReview loading states', () => {
         }
         if (channel === 'renderer:get-commit-file-review') {
           return fileReview.promise;
+        }
+        if (channel === 'renderer:get-commit-semantic-review') {
+          return Promise.resolve({ summary: {}, findings: [], affectedRequests: [] });
         }
         return Promise.reject(new Error(`Unexpected IPC channel: ${channel}`));
       })
