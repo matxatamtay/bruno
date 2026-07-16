@@ -481,6 +481,13 @@ export const serializeTab = (tab, collection) => {
     serialized.environment = { tab: tab.tabState.environment.tab };
   }
 
+  if (tab.type === 'web-recorder') {
+    serialized.intelligence = {
+      mode: tab.intelligenceMode || null,
+      scenarioId: tab.replayScenarioId || null
+    };
+  }
+
   return serialized;
 };
 
@@ -610,7 +617,9 @@ export const deserializeTab = (snapshotTab, collection) => {
     responseFormat: snapshotTab.response?.format || null,
     responseViewTab: snapshotTab.response?.viewTab || null,
     responsePaneScrollPosition: null,
-    scriptPaneTab: null
+    scriptPaneTab: null,
+    ...(type === 'web-recorder' && snapshotTab.intelligence?.mode ? { intelligenceMode: snapshotTab.intelligence.mode } : {}),
+    ...(type === 'web-recorder' && snapshotTab.intelligence?.scenarioId ? { replayScenarioId: snapshotTab.intelligence.scenarioId } : {})
   };
 
   const isCollectionScopedSingleton = type === 'preferences'

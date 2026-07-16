@@ -4,15 +4,9 @@ import { IconAlertTriangle, IconCheck, IconDownload, IconExternalLink, IconFolde
 import toast from 'react-hot-toast';
 import { addTab } from 'providers/ReduxStore/slices/tabs';
 import { runReplayScenario, selectEnvironment } from 'providers/ReduxStore/slices/collections/actions';
-import { findItemInCollection, flattenItems } from 'utils/collections';
+import { findItemInCollection } from 'utils/collections';
 import ReplayDependencyGraph from './ReplayDependencyGraph';
-
-const REQUEST_TYPES = new Set(['http-request', 'graphql-request', 'grpc-request', 'ws-request']);
-const collectionIdentity = (collection) => ({ uid: collection.uid, name: collection.name, pathname: collection.pathname });
-const requestDescriptors = (collection) => flattenItems(collection.items || []).filter((item) => REQUEST_TYPES.has(item.type)).map((item) => {
-  const source = item.draft || item;
-  return { itemUid: item.uid, pathname: item.pathname, name: item.name, type: item.type, method: source.request?.method || 'GET', url: source.request?.url || '' };
-});
+import { collectionIdentity, requestDescriptors } from './intelligence-utils';
 const schemaDiff = (baseline, actual, prefix = '', output = []) => {
   if (!baseline && actual) return output;
   if (baseline?.type !== actual?.type) output.push({ path: prefix || 'body', baseline: baseline?.type || 'missing', actual: actual?.type || 'missing' });
@@ -49,6 +43,10 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
   const [divergence, setDivergence] = useState(null);
   const [editorView, setEditorView] = useState('steps');
   const [draggedStepId, setDraggedStepId] = useState(null);
+  const [testDataProfiles, setTestDataProfiles] = useState([]);
+  const [testDataProfileId, setTestDataProfileId] = useState('');
+  const [replayTarget, setReplayTarget] = useState('environment');
+  const [mockState, setMockState] = useState({ running: false, url: null });
   const identity = useMemo(() => collectionIdentity(collection), [collection.uid, collection.name, collection.pathname]);
   const availableRequests = useMemo(() => requestDescriptors(collection), [collection.items]);
 
@@ -59,10 +57,23 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
   }, [identity, selectedId]);
 
   useEffect(() => { refresh().catch((error) => toast.error(error.message)); }, [refresh]);
+  useEffect(() => {
+    Promise.all([
+      window.ipcRenderer.invoke('renderer:api-intelligence:list-test-data', identity),
+      window.ipcRenderer.invoke('renderer:api-intelligence:get-mock-state')
+    ]).then(([profiles, state]) => {
+      setTestDataProfiles(profiles || []);
+      setMockState(state || { running: false, url: null });
+    }).catch(() => {});
+  }, [identity]);
   useEffect(() => { if (initialScenarioId) setSelectedId(initialScenarioId); }, [initialScenarioId]);
   useEffect(() => {
     if (!selectedId) return setScenario(null);
-    window.ipcRenderer.invoke('renderer:recorder:get-scenario', { collection: identity, scenarioId: selectedId }).then(setScenario).catch((error) => toast.error(error.message));
+    window.ipcRenderer.invoke('renderer:recorder:get-scenario', { collection: identity, scenarioId: selectedId }).then((next) => {
+      setScenario(next);
+      setTestDataProfileId(next?.testDataProfileId || '');
+      setReplayTarget(next?.replayTarget || 'environment');
+    }).catch((error) => toast.error(error.message));
   }, [identity, selectedId]);
   useEffect(() => {
     if (!selectedId) return;
@@ -116,7 +127,25 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
     setBusy(true);
     try {
       await dispatch(selectEnvironment(environmentUid || null, collection.uid));
-      const result = await dispatch(runReplayScenario(scenario, collection.uid, { environmentUid: environmentUid || null, stopOnFailure: true }));
+      let testData = null;
+      if (testDataProfileId) {
+        const profile = testDataProfiles.find((candidate) => candidate.profileId === testDataProfileId);
+        if (profile) testData = await window.ipcRenderer.invoke('renderer:api-intelligence:materialize-test-data', { profile, seed: profile.seed });
+      }
+      const currentMockState = replayTarget === 'mock-lab'
+        ? await window.ipcRenderer.invoke('renderer:api-intelligence:get-mock-state')
+        : mockState;
+      if (replayTarget === 'mock-lab' && !currentMockState?.running) throw new Error('Start Mock Lab before replaying against it');
+      const result = await dispatch(runReplayScenario(scenario, collection.uid, {
+        environmentUid: environmentUid || null,
+        stopOnFailure: true,
+        testData,
+        targetBaseUrl: replayTarget === 'mock-lab' ? currentMockState.url : null,
+        breakpoints: scenario.breakpoints || [],
+        onBreakpoint: async ({ when, step }) => {
+          if (!window.confirm(`Breakpoint ${when} “${step.name}”. Continue?`)) throw new Error('Replay stopped at breakpoint');
+        }
+      }));
       const saved = await window.ipcRenderer.invoke('renderer:recorder:save-run', { collection: identity, scenarioId: scenario.id, run: result });
       setLastRun(saved);
       setRuns((current) => [saved, ...current.filter((candidate) => candidate.id !== saved.id)]);
@@ -124,6 +153,35 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
       toast.success(saved.status === 'passed' ? 'Replay passed' : 'Replay stopped at the first failing step');
     } catch (error) { toast.error(error.message || 'Replay failed'); } finally { setBusy(false); }
   };
+  const promoteBaselineContracts = async () => {
+    if (!lastRun || lastRun.status !== 'passed') return toast.error('A passing run is required');
+    let promoted = 0;
+    for (const step of scenario.steps || []) {
+      const runStep = lastRun.steps?.find((candidate) => candidate.stepId === step.id);
+      const item = step.link?.requestUid ? findItemInCollection(collection, step.link.requestUid) : null;
+      if (!item || !runStep?.responseSchema) continue;
+      await window.ipcRenderer.invoke('renderer:api-intelligence:accept-schema-contract', {
+        collection: identity,
+        request: { uid: item.uid, itemUid: item.uid, name: item.name, pathname: item.pathname, type: item.type, request: (item.draft || item).request },
+        status: runStep.httpStatus || 200,
+        schema: runStep.responseSchema,
+        source: 'replay-baseline',
+        environmentScope: environmentUid ? 'environment-specific' : 'all',
+        environmentKey: environmentUid || null
+      });
+      promoted += 1;
+    }
+    toast.success(`Promoted ${promoted} Replay response contract${promoted === 1 ? '' : 's'} locally`);
+  };
+
+  const toggleBreakpoint = (stepId, when, enabled) => {
+    setScenario((current) => {
+      const existing = current.breakpoints || [];
+      const filtered = existing.filter((breakpoint) => !(breakpoint.stepId === stepId && breakpoint.when === when));
+      return { ...current, breakpoints: enabled ? [...filtered, { stepId, when }] : filtered };
+    });
+  };
+
   const saveBaseline = async () => {
     if (!lastRun || lastRun.status !== 'passed') return toast.error('Only a passing run can become the baseline');
     const saved = await window.ipcRenderer.invoke('renderer:recorder:save-baseline', { collection: identity, scenarioId: scenario.id, environmentKey: environmentUid || null, run: lastRun });
@@ -194,6 +252,20 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
             <div className="replay-editor-header">
               <input value={scenario.name || ''} onChange={(event) => setScenario({ ...scenario, name: event.target.value })} />
               <select value={environmentUid} onChange={(event) => setEnvironmentUid(event.target.value)}><option value="">No environment</option>{(collection.environments || []).map((env) => <option key={env.uid} value={env.uid}>{env.name}</option>)}</select>
+              <select
+                value={replayTarget}
+                onChange={(event) => {
+                  setReplayTarget(event.target.value); setScenario({ ...scenario, replayTarget: event.target.value });
+                }}
+              ><option value="environment">Active environment</option><option value="mock-lab">Mock Lab{mockState.running ? ` · ${mockState.url}` : ' · stopped'}</option>
+              </select>
+              <select
+                value={testDataProfileId}
+                onChange={(event) => {
+                  setTestDataProfileId(event.target.value); setScenario({ ...scenario, testDataProfileId: event.target.value || null });
+                }}
+              ><option value="">No test data</option>{testDataProfiles.map((profile) => <option key={profile.profileId} value={profile.profileId}>{profile.name}</option>)}
+              </select>
               <button className="button" onClick={save}>Save</button>
               <button className="button" onClick={exportScenario}><IconDownload size={14} /> Export</button>
               <button className="button danger" onClick={remove}><IconTrash size={14} /></button>
@@ -238,6 +310,8 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
                             <span>base ms <input type="number" min="0" value={step.replay.retry.backoffMs || 500} onChange={(event) => updateRetry(step, { backoffMs: Number(event.target.value) })} /></span>
                           </>
                         )}
+                        <label><input type="checkbox" checked={(scenario.breakpoints || []).some((breakpoint) => breakpoint.stepId === step.id && breakpoint.when === 'before')} onChange={(event) => toggleBreakpoint(step.id, 'before', event.target.checked)} /> Break before</label>
+                        <label><input type="checkbox" checked={(scenario.breakpoints || []).some((breakpoint) => breakpoint.stepId === step.id && breakpoint.when === 'after')} onChange={(event) => toggleBreakpoint(step.id, 'after', event.target.checked)} /> Break after</label>
                         <label><input type="checkbox" checked={Boolean(step.replay?.polling)} onChange={(event) => updatePolling(step, event.target.checked ? {} : null)} /> Polling</label>
                         {step.replay?.polling && (
                           <>
@@ -262,7 +336,7 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
               })}
               </div>
             )}
-            {lastRun && <div className="replay-run-summary"><strong>Last run: {lastRun.status}</strong><span>{lastRun.steps?.length || 0} executed steps</span>{lastRun.status === 'passed' && <button className="button" onClick={saveBaseline}>Save as good baseline</button>}{baseline && <span>Baseline: {new Date(baseline.savedAt).toLocaleString()}</span>}<span>{runs.length} saved run{runs.length === 1 ? '' : 's'}</span></div>}
+            {lastRun && <div className="replay-run-summary"><strong>Last run: {lastRun.status}</strong><span>{lastRun.steps?.length || 0} executed steps</span>{lastRun.status === 'passed' && <button className="button" onClick={saveBaseline}>Save as good baseline</button>}{lastRun.status === 'passed' && <button className="button" onClick={promoteBaselineContracts}>Promote contracts</button>}{baseline && <span>Baseline: {new Date(baseline.savedAt).toLocaleString()}</span>}<span>{runs.length} saved run{runs.length === 1 ? '' : 's'}</span></div>}
           </>
         )}
       </main>

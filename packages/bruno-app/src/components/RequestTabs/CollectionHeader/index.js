@@ -753,8 +753,8 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
                 <GitActions key={collection.pathname} collectionPath={collection.pathname} collectionUid={collection.uid} />
               )}
               {!isScratchCollection && (
-                <ToolHint text="Replay Studio" toolhintId="WebRecorderToolhintId" place="bottom">
-                  <ActionIcon onClick={handleOpenWebRecorder} aria-label="Replay Studio" size="sm" data-testid="web-recorder">
+                <ToolHint text="Intelligence Suite" toolhintId="WebRecorderToolhintId" place="bottom">
+                  <ActionIcon onClick={handleOpenWebRecorder} aria-label="Intelligence Suite" size="sm" data-testid="web-recorder">
                     <IconPlayerRecord size={16} strokeWidth={1.5} />
                   </ActionIcon>
                 </ToolHint>

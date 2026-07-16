@@ -1,6 +1,8 @@
 import get from 'lodash/get';
 import set from 'lodash/set';
 
+const SECRET_KEY = /token|secret|password|authorization|cookie|session|api[-_]?key/i;
+
 export const replayResponseData = (response) => {
   const value = response?.data ?? response?.body ?? response?.response?.data ?? null;
   if (typeof value !== 'string') return value;
@@ -8,13 +10,18 @@ export const replayResponseData = (response) => {
 };
 
 export const replaySchema = (value) => {
-  if (Array.isArray(value)) return { type: 'array', items: value.length ? replaySchema(value[0]) : null };
+  if (Array.isArray(value)) {
+    const itemSchemas = value.slice(0, 100).map(replaySchema);
+    return { type: 'array', items: itemSchemas[0] || { type: 'unknown' } };
+  }
   if (value && typeof value === 'object') {
     return {
       type: 'object',
-      properties: Object.fromEntries(Object.entries(value).map(([key, child]) => [key, replaySchema(child)]))
+      properties: Object.fromEntries(Object.entries(value).slice(0, 200).map(([key, child]) => [key, replaySchema(child)])),
+      required: Object.keys(value).slice(0, 200).sort()
     };
   }
+  if (typeof value === 'number') return { type: Number.isInteger(value) ? 'integer' : 'number' };
   return { type: value === null ? 'null' : typeof value };
 };
 
@@ -23,6 +30,53 @@ export const replayFingerprint = (value) => {
   let hashValue = 5381;
   for (let index = 0; index < text.length; index += 1) hashValue = ((hashValue << 5) + hashValue) ^ text.charCodeAt(index);
   return (hashValue >>> 0).toString(16);
+};
+
+export const redactReplayValue = (value, key = '', depth = 0) => {
+  if (SECRET_KEY.test(key)) return '<redacted>';
+  if (depth > 8) return '<depth-limit>';
+  if (Array.isArray(value)) return value.slice(0, 100).map((item) => redactReplayValue(item, key, depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).slice(0, 200).map(([childKey, child]) => [childKey, redactReplayValue(child, childKey, depth + 1)]));
+  }
+  if (typeof value === 'string' && value.length > 4096) return `${value.slice(0, 4096)}…<truncated>`;
+  return value;
+};
+
+const requestTarget = (item) => (item.draft || item).request || {};
+
+export const requestSnapshot = (item) => {
+  const request = requestTarget(item);
+  const bodyMode = request.body?.mode || 'none';
+  let body = bodyMode === 'json' ? request.body?.json : request.body?.[bodyMode];
+  if (bodyMode === 'json' && typeof body === 'string') {
+    try { body = JSON.parse(body); } catch {}
+  }
+  return redactReplayValue({
+    method: request.method || 'GET',
+    url: request.url || '',
+    headers: (request.headers || []).filter((header) => header.enabled !== false).map((header) => ({ name: header.name, value: redactReplayValue(header.value, header.name) })),
+    bodyMode,
+    body
+  });
+};
+
+export const applyReplayTarget = (item, targetBaseUrl) => {
+  if (!targetBaseUrl) return item;
+  const request = requestTarget(item);
+  const base = String(targetBaseUrl).replace(/\/+$/, '');
+  const raw = String(request.url || '');
+  if (/{{\s*baseUrl\s*}}/i.test(raw)) {
+    request.url = raw.replace(/{{\s*baseUrl\s*}}/gi, base);
+    return item;
+  }
+  try {
+    const current = new URL(raw);
+    request.url = `${base}${current.pathname}${current.search}`;
+  } catch {
+    request.url = `${base}/${raw.replace(/^\/+/, '')}`;
+  }
+  return item;
 };
 
 export const applyReplayBindings = (item, bindings = [], variables = {}) => {
@@ -63,6 +117,7 @@ export const evaluateReplayAssertions = (assertions = [], response) => {
     if (assertion.type === 'status') passed = Number(response?.status) === Number(assertion.expected);
     if (assertion.type === 'response-time') passed = Number(response?.duration || 0) < Number(assertion.expected);
     if (assertion.type === 'json-path-exists') passed = get(data, assertion.path) !== undefined;
+    if (assertion.type === 'json-path-equals') passed = get(data, assertion.path) === assertion.expected;
     return { ...assertion, passed };
   });
 };

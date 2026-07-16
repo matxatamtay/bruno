@@ -51,7 +51,7 @@ export const tabsSlice = createSlice({
   initialState,
   reducers: {
     addTab: (state, action) => {
-      const { uid, collectionUid, type, requestPaneTab, preview, exampleUid, itemUid, pathname, exampleName, exampleIndex, isTransient } = action.payload;
+      const { uid, collectionUid, type, requestPaneTab, preview, exampleUid, itemUid, pathname, exampleName, exampleIndex, isTransient, intelligenceMode, replayScenarioId } = action.payload;
 
       const nonReplaceableTabTypes = [
         'variables',
@@ -70,6 +70,8 @@ export const tabsSlice = createSlice({
 
       const existingTab = find(state.tabs, (tab) => tab.uid === uid);
       if (existingTab) {
+        if (intelligenceMode !== undefined) existingTab.intelligenceMode = intelligenceMode;
+        if (replayScenarioId !== undefined) existingTab.replayScenarioId = replayScenarioId;
         state.activeTabUid = existingTab.uid;
         return;
       }
@@ -86,6 +88,8 @@ export const tabsSlice = createSlice({
           if (!existingTab.uid && uid) {
             existingTab.uid = uid;
           }
+          if (intelligenceMode !== undefined) existingTab.intelligenceMode = intelligenceMode;
+          if (replayScenarioId !== undefined) existingTab.replayScenarioId = replayScenarioId;
           state.activeTabUid = existingTab.uid || null;
           return;
         }
@@ -125,7 +129,9 @@ export const tabsSlice = createSlice({
           ...(itemUid ? { itemUid } : {}),
           ...(exampleName ? { exampleName } : {}),
           ...(typeof exampleIndex === 'number' ? { exampleIndex } : {}),
-          ...(isTransient ? { isTransient: true } : {})
+          ...(isTransient ? { isTransient: true } : {}),
+          ...(intelligenceMode !== undefined ? { intelligenceMode } : {}),
+          ...(replayScenarioId !== undefined ? { replayScenarioId } : {})
         };
 
         state.activeTabUid = uid;
@@ -161,7 +167,9 @@ export const tabsSlice = createSlice({
         ...(itemUid ? { itemUid } : {}),
         ...(exampleName ? { exampleName } : {}),
         ...(typeof exampleIndex === 'number' ? { exampleIndex } : {}),
-        ...(isTransient ? { isTransient: true } : {})
+        ...(isTransient ? { isTransient: true } : {}),
+        ...(intelligenceMode !== undefined ? { intelligenceMode } : {}),
+        ...(replayScenarioId !== undefined ? { replayScenarioId } : {})
       });
       state.activeTabUid = uid;
     },

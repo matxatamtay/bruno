@@ -622,6 +622,26 @@ const extractPromptVariablesForRequest = async (item, collection) => {
   });
 };
 
+const recordApiObservation = ({ collection, item, response, source = 'single-run' }) => {
+  if (!Number.isInteger(Number(response?.status)) || typeof window === 'undefined' || !window.ipcRenderer?.invoke) return;
+  const requestSource = item.draft || item;
+  window.ipcRenderer.invoke('renderer:api-intelligence:record-observation', {
+    collection: { uid: collection.uid, name: collection.name, pathname: collection.pathname },
+    request: {
+      uid: item.uid,
+      name: item.name,
+      pathname: item.pathname,
+      type: item.type,
+      request: requestSource.request
+    },
+    response,
+    source,
+    environmentKey: collection.activeEnvironmentUid || null
+  }).catch(() => {
+    // Intelligence capture is best-effort and must never block the request UI.
+  });
+};
+
 export const sendRequest = (item, collectionUid) => (dispatch, getState) => {
   const state = getState();
   const { globalEnvironments, activeGlobalEnvironmentUid } = state.globalEnvironments;
@@ -702,6 +722,8 @@ export const sendRequest = (item, collectionUid) => (dispatch, getState) => {
               timestamp: entry.timestamp instanceof Date ? entry.timestamp.getTime() : entry.timestamp
             }))
           };
+
+          recordApiObservation({ collection, item: itemCopy, response: serializedResponse });
 
           return dispatch(
             responseReceived({

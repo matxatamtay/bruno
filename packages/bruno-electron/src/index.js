@@ -46,6 +46,7 @@ const registerApiSpecIpc = require('./ipc/apiSpec');
 const registerGitIpc = require('./ipc/git');
 const registerRecorderIpc = require('./ipc/recorder');
 const registerOpenAPISyncIpc = require('./ipc/openapi-sync');
+const registerApiIntelligenceIpc = require('./ipc/api-intelligence');
 const registerAiIpc = require('./ipc/ai');
 const registerAiAutocompleteIpc = require('./ipc/ai/autocomplete');
 const { registerMountIpc } = require('./ipc/mount');
@@ -521,6 +522,7 @@ app.on('ready', async () => {
   registerGitIpc(mainWindow);
   registerRecorderIpc(mainWindow);
   registerOpenAPISyncIpc(mainWindow);
+  registerApiIntelligenceIpc(mainWindow);
   registerAiIpc(mainWindow);
   registerAiAutocompleteIpc(mainWindow);
   registerMountIpc();

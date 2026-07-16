@@ -14,11 +14,13 @@ const createHarness = (responses) => {
   const collection = { uid: 'collection-1', items: [item] };
   const state = { collections: { collections: [collection] } };
   const getState = () => state;
-  const sendRequestAction = () => async () => {
+  const calls = [];
+  const sendRequestAction = (sentItem) => async () => {
+    calls.push(sentItem);
     item.response = responses.shift() || null;
   };
   const dispatch = async (action) => typeof action === 'function' ? action(dispatch, getState) : action;
-  return { dispatch, getState, sendRequestAction };
+  return { dispatch, getState, sendRequestAction, calls };
 };
 
 const scenarioFor = (replay) => ({
@@ -63,5 +65,63 @@ describe('Replay scenario attempt controller', () => {
     });
     expect(run.status).toBe('passed');
     expect(run.steps[0].attempts.map((attempt) => attempt.status)).toEqual(['waiting', 'passed']);
+  });
+
+  test('always runs cleanup without replacing the primary scenario failure', async () => {
+    const harness = createHarness([
+      { status: 500, duration: 10, data: { error: 'failed' } },
+      { status: 200, duration: 8, data: { deleted: true } }
+    ]);
+    const scenario = scenarioFor({});
+    scenario.cleanup = [{ id: 'cleanup-1', name: 'Cleanup request', requestUid: 'request-1', continueOnFailure: true }];
+    const run = await executeReplayScenario({
+      scenario,
+      collectionUid: 'collection-1',
+      dispatch: harness.dispatch,
+      getState: harness.getState,
+      sendRequestAction: harness.sendRequestAction
+    });
+    expect(run.status).toBe('failed');
+    expect(run.primaryFailure).toMatchObject({ stepId: 'step-1', status: 'failed' });
+    expect(run.cleanup).toEqual([expect.objectContaining({ stepId: 'cleanup-1', status: 'passed' })]);
+    expect(run.cleanupStatus).toBe('passed');
+  });
+
+  test('applies Mock Lab target and preserves deterministic test-data evidence', async () => {
+    const harness = createHarness([{ status: 200, duration: 10, data: { ok: true } }]);
+    const run = await executeReplayScenario({
+      scenario: scenarioFor({}),
+      collectionUid: 'collection-1',
+      options: {
+        targetBaseUrl: 'http://127.0.0.1:6178',
+        testData: { profileId: 'profile-1', profileName: 'Seed', seed: 'stable', variables: { email: 'seed@example.com' }, setupSteps: [], cleanupSteps: [] }
+      },
+      dispatch: harness.dispatch,
+      getState: harness.getState,
+      sendRequestAction: harness.sendRequestAction
+    });
+    expect(run.target).toMatchObject({ type: 'mock-lab', baseUrl: 'http://127.0.0.1:6178' });
+    expect(run.testData).toMatchObject({ profileId: 'profile-1', seed: 'stable' });
+    expect(run.initialVariables).toMatchObject({ email: 'seed@example.com' });
+    expect(harness.calls[0].request.url).toBe('http://127.0.0.1:6178/job');
+  });
+
+  test('can replay from a selected step without re-running earlier producers', async () => {
+    const harness = createHarness([{ status: 200, duration: 10, data: { ok: true } }]);
+    const scenario = scenarioFor({});
+    scenario.steps.push({ ...scenario.steps[0], id: 'step-2', name: 'Second request', order: 2 });
+    scenario.steps.push({ ...scenario.steps[0], id: 'step-3', name: 'Third request', order: 3 });
+    const run = await executeReplayScenario({
+      scenario,
+      collectionUid: 'collection-1',
+      options: { startStepId: 'step-2', onlyStep: true, historicalVariables: { userId: 'usr_1' } },
+      dispatch: harness.dispatch,
+      getState: harness.getState,
+      sendRequestAction: harness.sendRequestAction
+    });
+    expect(run.steps).toHaveLength(1);
+    expect(run.steps[0].stepId).toBe('step-2');
+    expect(run.stateCompleteness.status).toBe('partial');
+    expect(harness.calls).toHaveLength(1);
   });
 });

@@ -44,6 +44,29 @@ import { loadNotifications } from 'providers/ReduxStore/slices/notifications';
 import { updateSystemResources } from 'providers/ReduxStore/slices/performance';
 import { apiSpecAddFileEvent, apiSpecChangeFileEvent } from 'providers/ReduxStore/slices/apiSpec';
 import { recorderStateReceived, recorderEventReceived } from 'providers/ReduxStore/slices/recorder';
+import { findCollectionByUid, findItemInCollection } from 'utils/collections';
+
+export const recordRunnerObservation = ({ ipcRenderer, store, val }) => {
+  if (val?.type !== 'response-received' || !Number.isInteger(Number(val.responseReceived?.status))) return null;
+  const collection = findCollectionByUid(store.getState().collections.collections, val.collectionUid);
+  const item = collection ? findItemInCollection(collection, val.itemUid) : null;
+  if (!collection || !item) return null;
+  const source = item.draft || item;
+  return ipcRenderer.invoke('renderer:api-intelligence:record-observation', {
+    collection: { uid: collection.uid, name: collection.name, pathname: collection.pathname },
+    request: {
+      uid: item.uid,
+      itemUid: item.uid,
+      name: item.name,
+      pathname: item.pathname,
+      type: item.type,
+      request: source.request || {}
+    },
+    response: val.responseReceived,
+    source: 'runner',
+    environmentKey: collection.activeEnvironmentUid || null
+  }).catch(() => null);
+};
 
 const useIpcEvents = () => {
   const dispatch = useDispatch();
@@ -237,6 +260,7 @@ const useIpcEvents = () => {
       if (val.type === 'testrun-started' || val.type === 'request-queued') {
         dispatch(_clearScriptGlobalEnvBaseline());
       }
+      recordRunnerObservation({ ipcRenderer, store, val });
       dispatch(runFolderEvent(val));
     });
 

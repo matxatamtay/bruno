@@ -22,26 +22,25 @@ import {
   selectRecorderEvent,
   recorderErrorSet
 } from 'providers/ReduxStore/slices/recorder';
-import { findItemInCollection, flattenItems } from 'utils/collections';
+import { findItemInCollection } from 'utils/collections';
 import StyledWrapper from './StyledWrapper';
 import ReplayStudioPanel from './ReplayStudioPanel';
+import ContractsPanel from './ContractsPanel';
+import CoveragePanel from './CoveragePanel';
+import MockLabPanel from './MockLabPanel';
+import TestDataPanel from './TestDataPanel';
+import TracesPanel from './TracesPanel';
+import { requestDescriptors } from './intelligence-utils';
 
-const REQUEST_TYPES = new Set(['http-request', 'graphql-request', 'grpc-request', 'ws-request']);
-
-const buildRequestDescriptors = (collection) => flattenItems(collection?.items || [])
-  .filter((item) => REQUEST_TYPES.has(item.type))
-  .map((item) => {
-    const source = item.draft || item;
-    return {
-      itemUid: item.uid,
-      pathname: item.pathname,
-      name: item.name,
-      type: item.type,
-      method: source.request?.method || (item.type === 'graphql-request' ? 'POST' : 'GET'),
-      url: source.request?.url || ''
-    };
-  })
-  .filter((item) => item.url);
+const MODES = [
+  ['recordings', 'Recordings'],
+  ['scenarios', 'Replay'],
+  ['contracts', 'Contracts'],
+  ['coverage', 'Coverage'],
+  ['mocks', 'Mock Lab'],
+  ['test-data', 'Test Data'],
+  ['traces', 'Traces']
+];
 
 const eventTitle = (event) => {
   const data = event?.data || {};
@@ -79,14 +78,19 @@ const stringify = (value) => {
   return JSON.stringify(value, null, 2);
 };
 
-const WebRecorder = ({ collection, initialScenarioId = null }) => {
+const WebRecorder = ({ collection, initialScenarioId = null, initialMode = null }) => {
   const dispatch = useDispatch();
   const recorder = useSelector((state) => state.recorder);
   const [isBusy, setIsBusy] = useState(false);
   const [extensionPath, setExtensionPath] = useState('');
   const [assetUrl, setAssetUrl] = useState(null);
   const [detailTab, setDetailTab] = useState('overview');
-  const [studioMode, setStudioMode] = useState(initialScenarioId ? 'scenarios' : 'recordings');
+  const [studioMode, setStudioMode] = useState(initialScenarioId ? 'scenarios' : initialMode || 'recordings');
+
+  useEffect(() => {
+    if (initialScenarioId) setStudioMode('scenarios');
+    else if (initialMode) setStudioMode(initialMode);
+  }, [initialScenarioId, initialMode]);
 
   const selectedSessionId = recorder.selectedSessionId || recorder.activeSession?.id;
   const events = recorder.eventsBySession[selectedSessionId] || [];
@@ -183,7 +187,7 @@ const WebRecorder = ({ collection, initialScenarioId = null }) => {
       const state = await window.ipcRenderer.invoke('renderer:recorder:start', {
         name: `${collection.name} · ${new Date().toLocaleString()}`,
         collection: { uid: collection.uid, name: collection.name, pathname: collection.pathname },
-        requests: buildRequestDescriptors(collection)
+        requests: requestDescriptors(collection).filter((request) => request.url)
       });
       dispatch(recorderStateReceived(state));
       dispatch(selectRecorderSession(state.activeSession?.id));
@@ -265,34 +269,41 @@ const WebRecorder = ({ collection, initialScenarioId = null }) => {
         <div className="title-block">
           <IconActivity size={20} strokeWidth={1.5} />
           <div className="title-copy">
-            <strong>Replay Studio</strong>
-            <span>{collection.name} · record, link, replay and compare API scenarios locally</span>
+            <strong>Intelligence Suite</strong>
+            <span>{collection.name} · contracts, coverage, replay, mocks, test data and time-travel debugging</span>
           </div>
         </div>
         <div className="studio-mode-tabs">
-          <button className={studioMode === 'recordings' ? 'active' : ''} onClick={() => setStudioMode('recordings')}>Recordings</button>
-          <button className={studioMode === 'scenarios' ? 'active' : ''} onClick={() => setStudioMode('scenarios')}>Scenarios</button>
+          {MODES.map(([key, label]) => <button key={key} className={studioMode === key ? 'active' : ''} onClick={() => setStudioMode(key)}>{label}</button>)}
         </div>
         <div className="header-actions">
-          <select className="session-select" value={selectedSessionId || ''} onChange={(event) => loadSession(event.target.value)}>
-            <option value="">No recording selected</option>
-            {recorder.sessions.map((session) => (
-              <option key={session.id} value={session.id}>{session.name} · {session.status}</option>
-            ))}
-          </select>
-          <button className="button" onClick={importSession}><IconUpload size={14} /> Import</button>
-          <button className="button" disabled={!selectedSessionId} onClick={exportSession}><IconDownload size={14} /> Export</button>
-          {!isRecording ? (
-            <button className="button primary" disabled={isBusy} onClick={startRecording}><IconPlayerRecord size={14} /> Start</button>
-          ) : (
-            <button className="button danger" disabled={isBusy} onClick={stopRecording}><IconPlayerStop size={14} /> Stop</button>
+          {['recordings', 'scenarios'].includes(studioMode) && (
+            <>
+              <select className="session-select" value={selectedSessionId || ''} onChange={(event) => loadSession(event.target.value)}>
+                <option value="">No recording selected</option>
+                {recorder.sessions.map((session) => (
+                  <option key={session.id} value={session.id}>{session.name} · {session.status}</option>
+                ))}
+              </select>
+              <button className="button" onClick={importSession}><IconUpload size={14} /> Import</button>
+              <button className="button" disabled={!selectedSessionId} onClick={exportSession}><IconDownload size={14} /> Export</button>
+              {!isRecording ? (
+                <button className="button primary" disabled={isBusy} onClick={startRecording}><IconPlayerRecord size={14} /> Start</button>
+              ) : (
+                <button className="button danger" disabled={isBusy} onClick={stopRecording}><IconPlayerStop size={14} /> Stop</button>
+              )}
+            </>
           )}
         </div>
       </div>
 
-      {studioMode === 'scenarios' ? (
-        <ReplayStudioPanel collection={collection} selectedSessionId={selectedSessionId} initialScenarioId={initialScenarioId} />
-      ) : (
+      {studioMode === 'scenarios' && <ReplayStudioPanel collection={collection} selectedSessionId={selectedSessionId} initialScenarioId={initialScenarioId} />}
+      {studioMode === 'contracts' && <ContractsPanel collection={collection} />}
+      {studioMode === 'coverage' && <CoveragePanel collection={collection} />}
+      {studioMode === 'mocks' && <MockLabPanel collection={collection} />}
+      {studioMode === 'test-data' && <TestDataPanel collection={collection} />}
+      {studioMode === 'traces' && <TracesPanel collection={collection} />}
+      {studioMode === 'recordings' && (
         <>
           <div className="pairing-bar">
             <div className="pairing-row">

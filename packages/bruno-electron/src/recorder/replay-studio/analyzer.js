@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const { uuid } = require('../../utils/common');
 const { requestFingerprint } = require('./store');
 const { matchCollectionRequest } = require('../matcher');
+const { inferSchema, schemaFingerprint } = require('../../services/api-intelligence/schema');
+const { contentTypeFromResponse } = require('../../services/api-intelligence/contracts');
 
 const STATIC_EXTENSION = /\.(?:png|jpe?g|gif|svg|ico|css|woff2?|ttf|map)(?:\?|$)/i;
 const NOISE_HOST = /(?:google-analytics|googletagmanager|segment\.io|sentry|doubleclick|hotjar|amplitude)/i;
@@ -101,6 +103,21 @@ const inferPollingCondition = (group = []) => {
   return changed ? { path: `body.${changed.path}`, operator: 'eq', expected: changed.value } : null;
 };
 
+const observationFromExchange = (exchange) => {
+  const status = Number(exchange.response?.status);
+  if (!Number.isInteger(status)) return null;
+  const parsed = parseJson(exchange.response?.body);
+  const schema = inferSchema(parsed ?? exchange.response?.body ?? null);
+  return {
+    status,
+    duration: Number.isFinite(Number(exchange.duration)) ? Number(exchange.duration) : null,
+    contentType: contentTypeFromResponse({ headers: exchange.response?.headers || {}, data: exchange.response?.body }),
+    schema,
+    fingerprint: schemaFingerprint(schema),
+    timestamp: exchange.timestamp || null
+  };
+};
+
 const inferAssertions = (exchange) => {
   const assertions = [];
   if (exchange.response?.status && Number(exchange.response.status) < 400) assertions.push({ type: 'status', operator: 'eq', expected: Number(exchange.response.status), enabled: true });
@@ -147,6 +164,7 @@ const analyzeRecording = ({ session, requests = [], name }) => {
       overrides: {},
       extracts: [],
       assertions: inferAssertions(exchange),
+      observation: observationFromExchange(exchange),
       replay: classification.role === 'polling'
         ? { polling: { intervalMs: 2000, maxAttempts: Math.max(3, counts.get(key)), untilStatus: exchange.response?.status || 200 } }
         : classification.role === 'retry-candidate'
@@ -205,6 +223,8 @@ const analyzeRecording = ({ session, requests = [], name }) => {
       ...step,
       name: `${step.name} (poll until complete)`,
       source: { ...step.source, requestIds: group.map((item) => item.source.requestId) },
+      observation: group[group.length - 1]?.observation || step.observation,
+      sourceObservations: group.map((item) => item.observation).filter(Boolean),
       replay: {
         ...step.replay,
         polling: {

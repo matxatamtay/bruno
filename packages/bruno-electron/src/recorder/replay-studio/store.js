@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const AdmZip = require('adm-zip');
 const { uuid } = require('../../utils/common');
 const { isSafeArchivePath } = require('../session-store');
+const { buildCollectionIdentity, requestFingerprint } = require('../../services/api-intelligence/identity');
 
 const FORMAT = 'bruno-replay-studio';
 const SCHEMA_VERSION = 1;
@@ -20,41 +21,7 @@ const atomicWriteJson = (filePath, value) => {
   fs.writeFileSync(tempPath, JSON.stringify(value, null, 2));
   fs.renameSync(tempPath, filePath);
 };
-const normalizePath = (value = '') => path.resolve(String(value || '')).replace(/\\/g, '/').toLowerCase();
 const hash = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
-
-const buildCollectionIdentity = (collection = {}) => {
-  const pathname = normalizePath(collection.pathname);
-  const stableHint = collection.gitRemote
-    ? `remote:${collection.gitRemote}:${collection.name || ''}`
-    : collection.uid
-      ? `uid:${collection.uid}:${collection.name || ''}`
-      : `path:${pathname}`;
-  return {
-    key: hash(stableHint).slice(0, 32),
-    uid: collection.uid || null,
-    name: collection.name || path.basename(pathname) || 'Collection',
-    pathname,
-    gitRemote: collection.gitRemote || null
-  };
-};
-
-const requestFingerprint = (request = {}) => {
-  const source = request.draft || request;
-  const req = source.request || source;
-  const normalizedUrl = String(req.url || '').replace(/{{[^}]+}}/g, '{{var}}').replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, ':id').replace(/\/\d+(?=\/|$|\?)/g, '/:id');
-  const body = req.body || {};
-  const bodyShape = body.mode === 'json' ? (() => {
-    try { return Object.keys(JSON.parse(body.json || '{}')).sort(); } catch { return []; }
-  })() : [];
-  return hash(JSON.stringify({
-    method: String(req.method || 'GET').toUpperCase(),
-    url: normalizedUrl,
-    headerNames: (req.headers || []).filter((item) => item.enabled !== false).map((item) => String(item.name || '').toLowerCase()).sort(),
-    bodyMode: body.mode || 'none',
-    bodyShape
-  })).slice(0, 24);
-};
 
 class ReplayStudioStore {
   constructor(baseDirectory) {

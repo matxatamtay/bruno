@@ -5,10 +5,56 @@ const isDev = require('electron-is-dev');
 const RecorderManager = require('../recorder/RecorderManager');
 const { ReplayStudioStore } = require('../recorder/replay-studio/store');
 const { analyzeRecording } = require('../recorder/replay-studio/analyzer');
+const {
+  TraceStore,
+  ObservationStore,
+  buildTraceFromRun,
+  buildObservationFromShape,
+  buildRequestIdentity
+} = require('../services/api-intelligence');
 
 const registerRecorderIpc = (mainWindow) => {
   const manager = new RecorderManager(mainWindow);
   const replayStore = new ReplayStudioStore(path.join(app.getPath('userData'), 'replay-studio'));
+  const intelligenceDirectory = path.join(app.getPath('userData'), 'intelligence');
+  const traceStore = new TraceStore(intelligenceDirectory);
+  const observationStore = new ObservationStore(intelligenceDirectory);
+  const emitIntelligenceUpdate = (feature, collection, detail = {}) => {
+    mainWindow?.webContents?.send('main:api-intelligence-updated', {
+      feature,
+      collection: collection ? { uid: collection.uid || null, pathname: collection.pathname || null } : null,
+      timestamp: new Date().toISOString(),
+      ...detail
+    });
+  };
+  const requestDescriptorForStep = (step) => ({
+    uid: step.link?.requestUid || step.requestUid || null,
+    itemUid: step.link?.requestUid || step.requestUid || null,
+    name: step.name || null,
+    pathname: step.link?.pathHint || null,
+    type: 'http-request',
+    request: {
+      method: step.requestHint?.method || 'GET',
+      url: step.requestHint?.url || ''
+    }
+  });
+  const recordShape = ({ collection, step, shape, source, environmentKey = null, timestamp = null }) => {
+    if (!shape || !Number.isInteger(Number(shape.status)) || !shape.schema) return false;
+    const request = requestDescriptorForStep(step);
+    if (!request.uid && !request.pathname && !request.request.url) return false;
+    const observation = buildObservationFromShape({
+      requestRef: buildRequestIdentity(request),
+      status: shape.status,
+      duration: shape.duration,
+      contentType: shape.contentType,
+      schema: shape.schema,
+      source,
+      environmentKey,
+      timestamp: timestamp || shape.timestamp || null
+    });
+    observationStore.record(collection, request, observation);
+    return true;
+  };
   const extensionPath = isDev
     ? path.resolve(__dirname, '../../../bruno-recorder-extension')
     : path.join(process.resourcesPath, 'recorder-extension');
@@ -68,7 +114,17 @@ const registerRecorderIpc = (mainWindow) => {
     if (!sessionId || !collection?.pathname) throw new Error('Recording session and collection are required');
     const session = manager.store.loadSession(sessionId, 50000);
     const scenario = analyzeRecording({ session, requests: Array.isArray(requests) ? requests.slice(0, 10000) : [], name });
-    return replayStore.saveScenario(collection, scenario);
+    const saved = replayStore.saveScenario(collection, scenario);
+    let observationCount = 0;
+    for (const step of saved.steps || []) {
+      const shapes = step.sourceObservations?.length ? step.sourceObservations : [step.observation].filter(Boolean);
+      for (const shape of shapes) {
+        if (recordShape({ collection, step, shape, source: 'recording' })) observationCount += 1;
+      }
+    }
+    emitIntelligenceUpdate('replay', collection, { scenarioId: saved.id });
+    if (observationCount) emitIntelligenceUpdate('observations', collection, { source: 'recording', observationCount });
+    return saved;
   });
 
   ipcMain.handle('renderer:recorder:list-scenarios', async (event, collection) => {
@@ -83,12 +139,16 @@ const registerRecorderIpc = (mainWindow) => {
 
   ipcMain.handle('renderer:recorder:save-scenario', async (event, { collection, scenario }) => {
     if (!collection?.pathname || !scenario?.name) throw new Error('Collection and named scenario are required');
-    return replayStore.saveScenario(collection, scenario);
+    const saved = replayStore.saveScenario(collection, scenario);
+    emitIntelligenceUpdate('replay', collection, { scenarioId: saved.id });
+    return saved;
   });
 
   ipcMain.handle('renderer:recorder:delete-scenario', async (event, { collection, scenarioId }) => {
     if (!collection?.pathname || !scenarioId) throw new Error('Collection and scenario are required');
-    return replayStore.deleteScenario(collection, scenarioId);
+    const result = replayStore.deleteScenario(collection, scenarioId);
+    emitIntelligenceUpdate('replay', collection, { scenarioId });
+    return result;
   });
 
   ipcMain.handle('renderer:recorder:get-request-usage', async (event, { collection, requestUid }) => {
@@ -98,7 +158,32 @@ const registerRecorderIpc = (mainWindow) => {
 
   ipcMain.handle('renderer:recorder:save-run', async (event, { collection, scenarioId, run }) => {
     if (!collection?.pathname || !scenarioId || !run) throw new Error('Collection, scenario, and run are required');
-    return replayStore.saveRun(collection, scenarioId, run);
+    const scenario = replayStore.getScenario(collection, scenarioId);
+    const saved = replayStore.saveRun(collection, scenarioId, run);
+    const trace = traceStore.save(collection, buildTraceFromRun({ scenario, run: saved }));
+    const enriched = replayStore.saveRun(collection, scenarioId, { ...saved, traceId: trace.traceId });
+    let observationCount = 0;
+    for (const runStep of enriched.steps || []) {
+      const scenarioStep = (scenario?.steps || []).find((step) => step.id === runStep.stepId);
+      if (!scenarioStep) continue;
+      if (recordShape({
+        collection,
+        step: scenarioStep,
+        shape: {
+          status: runStep.httpStatus,
+          duration: runStep.duration,
+          contentType: runStep.contentType || null,
+          schema: runStep.responseSchema
+        },
+        source: 'replay',
+        environmentKey: enriched.environmentUid || enriched.environmentKey || null,
+        timestamp: enriched.startedAt || enriched.createdAt || null
+      })) observationCount += 1;
+    }
+    emitIntelligenceUpdate('traces', collection, { scenarioId, traceId: trace.traceId, runId: enriched.id });
+    if (observationCount) emitIntelligenceUpdate('observations', collection, { source: 'replay', observationCount });
+    emitIntelligenceUpdate('replay', collection, { scenarioId, runId: enriched.id });
+    return enriched;
   });
 
   ipcMain.handle('renderer:recorder:list-runs', async (event, { collection, scenarioId }) => {
@@ -108,7 +193,9 @@ const registerRecorderIpc = (mainWindow) => {
 
   ipcMain.handle('renderer:recorder:save-baseline', async (event, { collection, scenarioId, environmentKey, run }) => {
     if (!collection?.pathname || !scenarioId || !run) throw new Error('Collection, scenario, and run are required');
-    return replayStore.saveBaseline(collection, scenarioId, environmentKey, run);
+    const saved = replayStore.saveBaseline(collection, scenarioId, environmentKey, run);
+    emitIntelligenceUpdate('replay', collection, { scenarioId, baseline: true });
+    return saved;
   });
 
   ipcMain.handle('renderer:recorder:get-baseline', async (event, { collection, scenarioId, environmentKey }) => {

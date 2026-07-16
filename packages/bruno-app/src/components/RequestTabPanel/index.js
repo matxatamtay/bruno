@@ -456,7 +456,7 @@ const RequestTabPanel = () => {
   }
 
   if (focusedTab.type === 'web-recorder') {
-    return <WebRecorder collection={collection} initialScenarioId={focusedTab.replayScenarioId || null} />;
+    return <WebRecorder collection={collection} initialScenarioId={focusedTab.replayScenarioId || null} initialMode={focusedTab.intelligenceMode || null} />;
   }
 
   if (focusedTab.type === 'response-example') {

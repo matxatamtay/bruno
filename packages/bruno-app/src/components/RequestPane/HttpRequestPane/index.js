@@ -14,6 +14,8 @@ import Script from 'components/RequestPane/Script';
 import Tests from 'components/RequestPane/Tests';
 import Settings from 'components/RequestPane/Settings';
 import AppCodeEditor from 'components/RequestPane/AppCodeEditor';
+import ContractGuardian from 'components/RequestPane/ContractGuardian';
+import RequestCoverage from 'components/RequestPane/RequestCoverage';
 import Documentation from 'components/Documentation/index';
 import StatusDot from 'components/StatusDot';
 import ResponsiveTabs from 'ui/ResponsiveTabs';
@@ -31,6 +33,8 @@ const TAB_CONFIG = [
   { key: 'assert', label: 'Assert' },
   { key: 'tests', label: 'Tests' },
   { key: 'docs', label: 'Docs' },
+  { key: 'contract', label: 'Contract' },
+  { key: 'coverage', label: 'Coverage' },
   { key: 'app', label: 'App' },
   { key: 'settings', label: 'Settings' }
 ];
@@ -45,6 +49,8 @@ const TAB_PANELS = {
   script: Script,
   tests: Tests,
   docs: Documentation,
+  contract: ContractGuardian,
+  coverage: RequestCoverage,
   app: AppCodeEditor,
   settings: Settings
 };

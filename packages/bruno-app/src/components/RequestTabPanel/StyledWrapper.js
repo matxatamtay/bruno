@@ -101,8 +101,11 @@ const StyledWrapper = styled.div`
     }
   }
 
-  .replay-usage-badge { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; color: ${(props) => props.theme.primary.solid}; font-size: 10px; }
+  .replay-usage-badge { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; color: ${(props) => props.theme.primary.solid}; font-size: 10px; }
   .replay-usage-badge > button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; }
+  .replay-usage-badge .intelligence-chip { display: inline-flex; align-items: center; gap: 3px; padding: 3px 7px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 999px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; font-size: 9px; }
+  .replay-usage-badge .intelligence-chip.active { border-color: color-mix(in srgb, ${(props) => props.theme.primary.solid} 55%, ${(props) => props.theme.border.border1}); color: ${(props) => props.theme.primary.solid}; }
+  .replay-usage-badge .intelligence-chip.muted { color: ${(props) => props.theme.colors.text.muted}; }
   .replay-usage-badge label { display: inline-flex; align-items: center; gap: 3px; color: ${(props) => props.theme.colors.text.muted}; }
   .replay-usage-badge select { max-width: 180px; border: 0; background: transparent; color: ${(props) => props.theme.colors.text.muted}; cursor: pointer; font-size: 9px; }
 

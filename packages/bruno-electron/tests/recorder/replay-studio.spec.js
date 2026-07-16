@@ -82,6 +82,8 @@ describe('Replay Studio local core', () => {
     const scenario = analyzeRecording({ session: policySession, requests: [] });
     const polling = scenario.steps.find((step) => step.role === 'polling');
     const retry = scenario.steps.find((step) => step.role === 'retry-candidate');
+    expect(polling.sourceObservations).toHaveLength(3);
+    expect(polling.observation.schema).toMatchObject({ type: 'object' });
     expect(polling.replay.polling).toMatchObject({
       maxAttempts: 3,
       until: { path: 'body.status', operator: 'eq', expected: 'complete' }
@@ -103,6 +105,9 @@ describe('Replay Studio local core', () => {
     expect(scenario.analysis).toMatchObject({ totalExchanges: 3, includedExchanges: 2, ignoredExchanges: 1 });
     expect(scenario.steps).toHaveLength(2);
     expect(scenario.steps[0].link.requestUid).toBe('login');
+    expect(scenario.steps[0].observation).toMatchObject({ status: 200, duration: 120, schema: { type: 'object' } });
+    expect(scenario.steps[1].observation).toMatchObject({ status: 201, duration: 240, schema: { type: 'object' } });
+    expect(JSON.stringify(scenario.steps.map((step) => step.observation))).not.toContain('token-123456789');
     expect(scenario.steps[0].extracts).toEqual(expect.arrayContaining([expect.objectContaining({ variable: 'accessToken', sensitivity: 'secret' })]));
     expect(scenario.steps[1].overrides.bindings).toEqual(expect.arrayContaining([expect.objectContaining({ variable: 'accessToken' })]));
     expect(scenario.steps[1].assertions).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'status', expected: 201 })]));
