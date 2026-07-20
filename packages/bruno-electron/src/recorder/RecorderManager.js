@@ -1,17 +1,21 @@
 const http = require('http');
+const fs = require('fs');
 const crypto = require('crypto');
-const { app } = require('electron');
+const { app, safeStorage } = require('electron');
 const path = require('path');
 const { uuid } = require('../utils/common');
 const { redactRecorderEvent } = require('./redaction');
 const { matchCollectionRequest } = require('./matcher');
 const { RecorderSessionStore } = require('./session-store');
+const { LocalSecretVault, encryptSecretBundle, decryptSecretBundle } = require('./secret-vault');
 
 const DEFAULT_PORT = 6174;
 const MAX_REQUEST_BYTES = 12 * 1024 * 1024;
 const ALLOWED_EVENT_TYPES = new Set([
   'recorder', 'action', 'navigation', 'network-request', 'network-response',
-  'network-failed', 'console', 'screenshot', 'marker'
+  'network-request-extra', 'network-failed', 'websocket-created', 'websocket-handshake',
+  'websocket-frame', 'websocket-closed', 'websocket-error', 'storage-checkpoint',
+  'storage-change', 'cookie-checkpoint', 'console', 'screenshot', 'marker'
 ]);
 const SENSITIVE_FIELD = /authorization|cookie|token|secret|password|passwd|api[_-]?key|session|otp|pin|cvv|cvc/i;
 
@@ -80,6 +84,7 @@ class RecorderManager {
     this.activeSession = null;
     this.requestMatches = new Map();
     this.store = new RecorderSessionStore(path.join(app.getPath('userData'), 'recordings'));
+    this.secretVault = new LocalSecretVault(path.join(app.getPath('userData'), 'recording-secrets'), safeStorage);
   }
 
   isAuthorized(request) {
@@ -141,6 +146,7 @@ class RecorderManager {
       collectionRequests: Array.isArray(metadata.requests) ? metadata.requests.slice(0, 10000) : []
     };
     this.requestMatches.clear();
+    this.secretVault.clear(manifest.id);
     this.broadcastState();
     return this.getState();
   }
@@ -158,7 +164,7 @@ class RecorderManager {
     return this.getState();
   }
 
-  sensitiveFingerprints(rawEvent) {
+  sensitiveValues(rawEvent) {
     const data = rawEvent?.data || {};
     const values = [];
     Object.entries(data.headers || {}).forEach(([key, value]) => {
@@ -166,14 +172,36 @@ class RecorderManager {
     });
     const parsedBody = parseMaybeJson(data.body);
     if (parsedBody) collectSensitiveValues(parsedBody, 'body', values);
+    const parsedPayload = parseMaybeJson(data.payload);
+    if (parsedPayload) collectSensitiveValues(parsedPayload, 'payload', values);
+    for (const cookie of data.cookies || []) {
+      if (cookie?.name && cookie?.value != null) values.push({ path: `cookies.${cookie.name}`, value: String(cookie.value) });
+    }
+    for (const associated of data.associatedCookies || []) {
+      const cookie = associated?.cookie || associated;
+      if (cookie?.name && cookie?.value != null) values.push({ path: `cookies.${cookie.name}`, value: String(cookie.value) });
+    }
+    if (data.storageType && data.key && data.newValue != null && SENSITIVE_FIELD.test(data.key)) {
+      values.push({ path: `storage.${data.storageType}.${data.key}`, value: String(data.newValue) });
+    }
+    if (data.localStorage) {
+      collectSensitiveValues(data.localStorage.values || data.localStorage, 'storage.localStorage', values);
+    }
+    if (data.sessionStorage) {
+      collectSensitiveValues(data.sessionStorage.values || data.sessionStorage, 'storage.sessionStorage', values);
+    }
     try {
       const url = new URL(data.url || '');
       url.searchParams.forEach((value, key) => {
         if (SENSITIVE_FIELD.test(key)) values.push({ path: `query.${key}`, value });
       });
     } catch {}
-    return values.map((entry) => ({ ...entry, value: normalizeSensitiveValue(entry.path, entry.value) }))
-      .filter((entry) => entry.value && entry.value !== '<redacted>')
+    return values.filter((entry) => entry.value && entry.value !== '<redacted>');
+  }
+
+  sensitiveFingerprints(rawEvent) {
+    return this.sensitiveValues(rawEvent)
+      .map((entry) => ({ ...entry, value: normalizeSensitiveValue(entry.path, entry.value) }))
       .map((entry) => ({
         path: entry.path,
         fingerprint: crypto.createHmac('sha256', this.fingerprintKey).update(entry.value).digest('hex')
@@ -208,12 +236,21 @@ class RecorderManager {
 
     let accepted = 0;
     for (const rawEvent of rawEvents.slice(0, 500)) {
-      const event = this.normalizeEvent(rawEvent);
+      const eventId = typeof rawEvent?.id === 'string' ? rawEvent.id : uuid();
+      const preparedRawEvent = { ...rawEvent, id: eventId };
+      const rawSecrets = this.sensitiveValues(preparedRawEvent);
+      const event = this.normalizeEvent(preparedRawEvent);
       if (!event) continue;
+      if (rawSecrets.length) this.secretVault.append(sessionId, event.id, rawSecrets, event.data?.requestId || null);
 
       if (event.type === 'screenshot' && event.data?.base64) {
         const screenshotPath = this.store.writeScreenshot(sessionId, event.id, event.data.base64, event.data.mimeType);
-        event.data = { ...event.data, base64: undefined, screenshotPath };
+        event.data = {
+          ...event.data,
+          base64: undefined,
+          screenshotPath,
+          screenshotOmitted: screenshotPath ? null : 'Session screenshot budget reached'
+        };
         delete event.data.base64;
       }
 
@@ -237,7 +274,10 @@ class RecorderManager {
           ...event.data,
           body: typeof event.data?.body === 'string' && event.data.body.length > 128 * 1024
             ? `${event.data.body.slice(0, 128 * 1024)}\n<... open exported recording for the full captured body ...>`
-            : event.data?.body
+            : event.data?.body,
+          payload: typeof event.data?.payload === 'string' && event.data.payload.length > 128 * 1024
+            ? `${event.data.payload.slice(0, 128 * 1024)}\n<... open exported run for the full captured frame ...>`
+            : event.data?.payload
         }
       };
       this.mainWindow?.webContents?.send('main:recorder-event', { sessionId, event: rendererEvent });
@@ -262,6 +302,39 @@ class RecorderManager {
         collection: this.activeSession.collection
       } : null
     };
+  }
+
+  exportSession(sessionId, destinationPath, options = {}) {
+    let secretBundle = null;
+    let secretRecordCount = 0;
+    if (options.includeSecrets) {
+      const records = this.secretVault.read(sessionId);
+      if (!records.length) throw new Error('No locally encrypted secrets are available for this run');
+      secretBundle = encryptSecretBundle(records, options.passphrase);
+      secretRecordCount = records.length;
+    }
+    return this.store.exportSession(sessionId, destinationPath, { secretBundle, secretRecordCount });
+  }
+
+  unlockImportedSecrets(sessionId, passphrase) {
+    const secretPath = path.join(this.store.getSessionDirectory(sessionId), 'secrets.enc');
+    if (!fs.existsSync(secretPath)) throw new Error('This run has no encrypted secret bundle');
+    const records = decryptSecretBundle(fs.readFileSync(secretPath), passphrase);
+    const recordCount = this.secretVault.importRecords(sessionId, records);
+    const manifest = this.store.readManifest(sessionId);
+    this.store.updateSession(sessionId, {
+      secrets: {
+        ...(manifest?.secrets || {}),
+        encrypted: true,
+        unlocked: true,
+        recordCount
+      }
+    });
+    return { unlocked: true, recordCount };
+  }
+
+  getDebugSecrets(sessionId, source) {
+    return this.secretVault.entriesForSource(sessionId, source);
   }
 
   getState() {

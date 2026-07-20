@@ -6,13 +6,41 @@ const { inferSchema, schemaFingerprint } = require('../../services/api-intellige
 const { contentTypeFromResponse } = require('../../services/api-intelligence/contracts');
 
 const STATIC_EXTENSION = /\.(?:png|jpe?g|gif|svg|ico|css|woff2?|ttf|map)(?:\?|$)/i;
-const NOISE_HOST = /(?:google-analytics|googletagmanager|segment\.io|sentry|doubleclick|hotjar|amplitude)/i;
+const NOISE_HOST = /(?:google-analytics|googletagmanager|segment\.io|sentry|doubleclick|hotjar|amplitude|nitropay)/i;
 const SECRET_KEY = /token|secret|password|authorization|cookie|session/i;
 const ID_KEY = /(^|_)(id|uuid)$|Id$|ID$/;
+const GENERATED_HEADER = /^(?:host|connection|content-length|accept-encoding|user-agent|origin|referer|sec-|proxy-)/i;
 const parseJson = (value) => {
   if (value && typeof value === 'object') return value;
   if (typeof value !== 'string' || !value.trim()) return null;
   try { return JSON.parse(value); } catch { return null; }
+};
+const capturedRequestFromExchange = (exchange, sessionId, stateSnapshot) => {
+  const body = exchange.request?.body;
+  const parsedBody = parseJson(body);
+  const headers = Object.entries(exchange.request?.headers || {})
+    .filter(([name]) => !GENERATED_HEADER.test(name))
+    .map(([name, value]) => ({ name, value: String(value), enabled: true }));
+  return {
+    source: {
+      sessionId,
+      eventId: exchange.requestEventId,
+      eventIds: stateSnapshot?.sourceEventIds || [],
+      requestId: exchange.id
+    },
+    method: String(exchange.request?.method || 'GET').toUpperCase(),
+    url: exchange.request?.url || '',
+    headers,
+    body: {
+      mode: parsedBody ? 'json' : body ? 'text' : 'none',
+      content: parsedBody ? JSON.stringify(parsedBody, null, 2) : body || ''
+    },
+    state: {
+      secretsAvailable: false,
+      missingSecretPaths: (exchange.request?.sensitiveFingerprints || []).map((entry) => entry.path),
+      snapshot: stateSnapshot
+    }
+  };
 };
 const normalizeUrl = (rawUrl = '') => {
   try {
@@ -48,29 +76,89 @@ const variableNameFor = (sourcePath, index) => {
 };
 const pairExchanges = (events = []) => {
   const requests = new Map();
+  const requestExtras = new Map();
   const responses = new Map();
   const failures = new Map();
   events.forEach((event) => {
     const requestId = event.data?.requestId;
     if (!requestId) return;
     if (event.type === 'network-request') requests.set(requestId, event);
+    if (event.type === 'network-request-extra') requestExtras.set(requestId, event);
     if (event.type === 'network-response') responses.set(requestId, event);
     if (event.type === 'network-failed') failures.set(requestId, event);
   });
   return [...requests.entries()].map(([requestId, requestEvent]) => {
+    const extraEvent = requestExtras.get(requestId);
     const responseEvent = responses.get(requestId);
     const failureEvent = failures.get(requestId);
+    const request = {
+      ...(requestEvent.data || {}),
+      headers: {
+        ...(requestEvent.data?.headers || {}),
+        ...(extraEvent?.data?.headers || {})
+      },
+      associatedCookies: extraEvent?.data?.associatedCookies || [],
+      sensitiveFingerprints: [
+        ...(requestEvent.data?.sensitiveFingerprints || []),
+        ...(extraEvent?.data?.sensitiveFingerprints || [])
+      ]
+    };
     return {
       id: requestId,
+      requestEventId: requestEvent.id,
       timestamp: requestEvent.timestamp,
       actionId: requestEvent.actionId || null,
-      request: requestEvent.data || {},
+      request,
       response: responseEvent?.data || null,
       failure: failureEvent?.data || null,
       duration: responseEvent?.data?.duration ?? null,
       match: requestEvent.data?.match || responseEvent?.data?.match || null
     };
   }).sort((a, b) => a.timestamp - b.timestamp);
+};
+
+const stateSnapshotAt = (events = [], timestamp, requestUrl) => {
+  let origin = null;
+  try { origin = new URL(requestUrl).origin; } catch {}
+  const snapshot = {
+    origin,
+    localStorage: {},
+    sessionStorage: {},
+    cookies: [],
+    completeness: 'partial',
+    sourceEventIds: []
+  };
+  for (const event of [...events].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (event.timestamp > timestamp) break;
+    const data = event.data || {};
+    let eventOrigin = data.origin || null;
+    if (!eventOrigin && data.url) {
+      try { eventOrigin = new URL(data.url).origin; } catch {}
+    }
+    if (origin && eventOrigin && eventOrigin !== origin) continue;
+    if (event.type === 'storage-checkpoint') {
+      snapshot.sourceEventIds.push(event.id);
+      snapshot.localStorage = { ...(data.localStorage?.values || data.localStorage || {}) };
+      snapshot.sessionStorage = { ...(data.sessionStorage?.values || data.sessionStorage || {}) };
+      snapshot.storageTruncated = Boolean(data.localStorage?.truncated || data.sessionStorage?.truncated);
+      snapshot.completeness = snapshot.storageTruncated ? 'partial' : 'ready';
+    } else if (event.type === 'storage-change') {
+      snapshot.sourceEventIds.push(event.id);
+      const target = data.storageType === 'sessionStorage' ? snapshot.sessionStorage : snapshot.localStorage;
+      if (data.operation === 'cleared') {
+        if (data.storageType === 'sessionStorage') snapshot.sessionStorage = {};
+        else snapshot.localStorage = {};
+      } else if (data.operation === 'removed') {
+        delete target[data.key];
+      } else if (data.key) {
+        target[data.key] = data.newValue;
+      }
+    } else if (event.type === 'cookie-checkpoint') {
+      snapshot.sourceEventIds.push(event.id);
+      snapshot.cookies = data.cookies || [];
+    }
+  }
+  return snapshot;
 };
 const isNoise = (exchange) => {
   const { request } = exchange;
@@ -161,6 +249,7 @@ const analyzeRecording = ({ session, requests = [], name }) => {
         url: exchange.request.url,
         fingerprint: requestFingerprint({ request: { method: exchange.request.method, url: exchange.request.url, headers: Object.entries(exchange.request.headers || {}).map(([name, value]) => ({ name, value, enabled: true })), body: { mode: parseJson(exchange.request.body) ? 'json' : exchange.request.body ? 'text' : 'none', json: parseJson(exchange.request.body) ? JSON.stringify(parseJson(exchange.request.body)) : '' } } })
       },
+      capturedRequest: capturedRequestFromExchange(exchange, session.manifest.id, stateSnapshotAt(session.events || [], exchange.timestamp, exchange.request.url)),
       overrides: {},
       extracts: [],
       assertions: inferAssertions(exchange),

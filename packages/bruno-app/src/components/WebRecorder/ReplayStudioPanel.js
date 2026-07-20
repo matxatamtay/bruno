@@ -3,9 +3,17 @@ import { useDispatch } from 'react-redux';
 import { IconAlertTriangle, IconCheck, IconDownload, IconExternalLink, IconFolder, IconPlayerPlay, IconRefresh, IconTrash, IconUpload } from '@tabler/icons';
 import toast from 'react-hot-toast';
 import { addTab } from 'providers/ReduxStore/slices/tabs';
+import { hydrateRequestDebugDraft } from 'providers/ReduxStore/slices/collections';
 import { runReplayScenario, selectEnvironment } from 'providers/ReduxStore/slices/collections/actions';
 import { findItemInCollection } from 'utils/collections';
+import { applyCapturedSecrets, buildCapturedDebugRequest } from 'utils/replay-studio';
 import ReplayDependencyGraph from './ReplayDependencyGraph';
+
+const capturedStateText = (snapshot) => {
+  if (!snapshot) return '{}';
+  const { sourceEventIds, ...visible } = snapshot;
+  return JSON.stringify(visible, null, 2);
+};
 import { collectionIdentity, requestDescriptors } from './intelligence-utils';
 const schemaDiff = (baseline, actual, prefix = '', output = []) => {
   if (!baseline && actual) return output;
@@ -119,6 +127,52 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
     const item = step.link?.requestUid ? findItemInCollection(collection, step.link.requestUid) : null;
     if (!item) return toast.error('Linked request is missing from the current collection');
     dispatch(addTab({ uid: item.uid, collectionUid: collection.uid, type: item.type, pathname: item.pathname, preview: false }));
+  };
+  const debugInCollection = async (step) => {
+    const item = step.link?.requestUid ? findItemInCollection(collection, step.link.requestUid) : null;
+    if (!item) return toast.error('Linked request is missing from the current collection');
+    if (!step.capturedRequest) return toast.error('This scenario has no captured request context');
+    let capturedRequest = step.capturedRequest;
+    const source = capturedRequest.source;
+    if (source?.sessionId && source?.eventId) {
+      try {
+        const secrets = await window.ipcRenderer.invoke('renderer:recorder:get-debug-secrets', source);
+        if (secrets?.length) capturedRequest = applyCapturedSecrets(capturedRequest, secrets);
+      } catch {}
+    }
+    const request = buildCapturedDebugRequest(item, capturedRequest);
+    dispatch(hydrateRequestDebugDraft({ collectionUid: collection.uid, itemUid: item.uid, request }));
+    dispatch(addTab({ uid: item.uid, collectionUid: collection.uid, type: item.type, pathname: item.pathname, preview: false }));
+    const missingSecrets = capturedRequest.state?.secretsAvailable
+      ? 0
+      : step.capturedRequest.state?.missingSecretPaths?.length || 0;
+    toast.success(missingSecrets
+      ? `Captured request loaded into draft · ${missingSecrets} secret value${missingSecrets === 1 ? '' : 's'} kept from your local collection`
+      : `Captured request loaded into the collection draft${capturedRequest.state?.secretsAvailable ? ' · encrypted secrets restored' : ''}`);
+  };
+  const retryStep = async (step) => {
+    if (!scenario) return;
+    setBusy(true);
+    try {
+      await dispatch(selectEnvironment(environmentUid || null, collection.uid));
+      const traceStep = lastRun?.trace?.steps?.find((candidate) => candidate.stepId === step.id);
+      const historicalVariables = traceStep?.before?.variablesByScope?.scenario || lastRun?.initialVariables || {};
+      const result = await dispatch(runReplayScenario(scenario, collection.uid, {
+        environmentUid: environmentUid || null,
+        startStepId: step.id,
+        onlyStep: true,
+        historicalVariables,
+        stopOnFailure: true
+      }));
+      const saved = await window.ipcRenderer.invoke('renderer:recorder:save-run', { collection: identity, scenarioId: scenario.id, run: { ...result, retriedStepId: step.id, forkedFromRunId: lastRun?.id || null } });
+      setLastRun(saved);
+      setRuns((current) => [saved, ...current.filter((candidate) => candidate.id !== saved.id)]);
+      toast.success(saved.status === 'passed' ? 'Failed step now passes' : 'Step retried with the current collection draft');
+    } catch (error) {
+      toast.error(error.message || 'Unable to retry step');
+    } finally {
+      setBusy(false);
+    }
   };
   const run = async () => {
     if (!scenario) return;
@@ -323,6 +377,12 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
                           </>
                         )}
                       </div>
+                      {step.capturedRequest?.state?.snapshot && (
+                        <details className="replay-state-inspector">
+                          <summary>Captured state before request</summary>
+                          <pre>{capturedStateText(step.capturedRequest.state.snapshot)}</pre>
+                        </details>
+                      )}
                     </div>
                     <span className={`replay-run-status ${runStep?.status || ''}`}>{runStep?.status === 'passed' ? <IconCheck size={14} /> : runStep?.status || ''}</span>
                     {!linked ? (
@@ -330,7 +390,13 @@ const ReplayStudioPanel = ({ collection, selectedSessionId, initialScenarioId = 
                         <option value="">Relink…</option>
                         {availableRequests.map((request) => <option key={request.itemUid} value={request.itemUid}>{request.method} · {request.name}</option>)}
                       </select>
-                    ) : <button className="button" onClick={() => openRequest(step)}><IconExternalLink size={13} /> Open</button>}
+                    ) : (
+                      <div className="intelligence-actions">
+                        {runStep && runStep.status !== 'passed' && step.capturedRequest && <button className="button" onClick={() => debugInCollection(step)}><IconExternalLink size={13} /> Debug draft</button>}
+                        {runStep && runStep.status !== 'passed' && <button className="button primary" disabled={busy} onClick={() => retryStep(step)}><IconPlayerPlay size={13} /> Retry step</button>}
+                        <button className="button" onClick={() => openRequest(step)}><IconExternalLink size={13} /> Open</button>
+                      </div>
+                    )}
                   </div>
                 );
               })}

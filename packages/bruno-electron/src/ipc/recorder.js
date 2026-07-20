@@ -73,30 +73,40 @@ const registerRecorderIpc = (mainWindow) => {
   ipcMain.handle('renderer:recorder:list-sessions', async () => manager.store.listSessions());
   ipcMain.handle('renderer:recorder:load-session', async (event, sessionId) => manager.store.loadSession(sessionId));
 
-  ipcMain.handle('renderer:recorder:export', async (event, sessionId) => {
+  ipcMain.handle('renderer:recorder:export', async (event, options) => {
+    const sessionId = typeof options === 'string' ? options : options?.sessionId;
     const manifest = manager.store.readManifest(sessionId);
     if (!manifest) throw new Error('Recording session not found');
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Export Bruno Web Recording',
-      defaultPath: `${String(manifest.name || 'web-recording').replace(/[^a-z0-9._-]+/gi, '-')}.brurec`,
-      filters: [{ name: 'Bruno Web Recording', extensions: ['brurec'] }]
+      title: 'Export Bruno Run',
+      defaultPath: `${String(manifest.name || 'web-recording').replace(/[^a-z0-9._-]+/gi, '-')}.brunorun`,
+      filters: [{ name: 'Bruno Run', extensions: ['brunorun'] }]
     });
     if (result.canceled || !result.filePath) return { canceled: true };
-    manager.store.exportSession(sessionId, result.filePath);
-    return { canceled: false, filePath: result.filePath };
+    return { canceled: false, ...manager.exportSession(sessionId, result.filePath, options || {}) };
   });
 
   ipcMain.handle('renderer:recorder:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Import Bruno Web Recording',
+      title: 'Import Bruno Run',
       properties: ['openFile'],
-      filters: [{ name: 'Bruno Web Recording', extensions: ['brurec'] }]
+      filters: [
+        { name: 'Bruno Run', extensions: ['brunorun'] },
+        { name: 'Legacy Bruno Web Recording', extensions: ['brurec'] }
+      ]
     });
     if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
     const session = manager.store.importSession(result.filePaths[0]);
     manager.broadcastState();
     return { canceled: false, session };
   });
+
+  ipcMain.handle('renderer:recorder:unlock-secrets', async (event, { sessionId, passphrase }) => (
+    manager.unlockImportedSecrets(sessionId, passphrase)
+  ));
+  ipcMain.handle('renderer:recorder:get-debug-secrets', async (event, source) => (
+    manager.getDebugSecrets(source?.sessionId, source)
+  ));
 
   ipcMain.handle('renderer:recorder:get-asset', async (event, sessionId, relativePath) => {
     if (!sessionId || !relativePath || typeof relativePath !== 'string') throw new Error('Invalid recording asset');

@@ -76,6 +76,9 @@ const StyledWrapper = styled.div`
   .pairing-row code { padding: 3px 6px; border-radius: 4px; background: ${(props) => props.theme.background.base}; user-select: all; }
   .pairing-token { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pairing-help { color: ${(props) => props.theme.colors.text.muted}; }
+  .run-storage-summary { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; color: ${(props) => props.theme.colors.text.muted}; }
+  .run-storage-summary strong { color: ${(props) => props.theme.text}; font-size: 11px; }
+  .run-storage-summary span { padding: 2px 5px; border-radius: 999px; background: ${(props) => props.theme.background.base}; }
 
   .recorder-grid {
     flex: 1;
@@ -103,6 +106,9 @@ const StyledWrapper = styled.div`
     letter-spacing: .04em;
   }
   .column-title small { color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; text-transform: none; }
+  .column-title-actions { display: flex; align-items: center; gap: 7px; }
+  .noise-toggle { padding: 2px 6px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 999px; background: transparent; color: ${(props) => props.theme.colors.text.muted}; cursor: pointer; font-size: 8px; text-transform: none; letter-spacing: 0; }
+  .noise-toggle:hover { color: ${(props) => props.theme.text}; background: ${(props) => props.theme.sidebar.collection.item.hoverBg}; }
 
   .timeline-list, .details-scroll { flex: 1; min-height: 0; overflow: auto; }
   .timeline-row {
@@ -196,6 +202,9 @@ const StyledWrapper = styled.div`
   .replay-policy-row select, .replay-condition-path, .replay-condition-value { min-height: 24px; padding: 2px 5px; border: 1px solid ${(props) => props.theme.border.border1}; border-radius: 4px; background: ${(props) => props.theme.background.base}; color: ${(props) => props.theme.text}; font-size: 9px; }
   .replay-condition-path { width: 120px; }
   .replay-condition-value { width: 85px; }
+  .replay-state-inspector { margin-top: 5px; }
+  .replay-state-inspector summary { width: fit-content; color: ${(props) => props.theme.primary.solid}; cursor: pointer; font-size: 9px; }
+  .replay-state-inspector pre { max-height: 220px; margin-top: 5px; }
   .replay-run-status { min-width: 50px; color: ${(props) => props.theme.colors.text.muted}; font-size: 9px; text-transform: uppercase; }
   .replay-run-status.passed { color: ${(props) => props.theme.colors.text.green}; }
   .replay-run-status.failed, .replay-run-status.missing-link { color: ${(props) => props.theme.colors.text.danger}; }

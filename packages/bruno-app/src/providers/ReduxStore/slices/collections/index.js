@@ -260,6 +260,21 @@ export const collectionsSlice = createSlice({
         state.collections.push(collection);
       }
     },
+    hydrateRequestDebugDraft: (state, action) => {
+      const collection = findCollectionByUid(state.collections, action.payload.collectionUid);
+      if (!collection) return;
+      const item = findItemInCollection(collection, action.payload.itemUid);
+      if (!item || !isItemARequest(item) || !action.payload.request) return;
+      if (!item.draft) item.draft = cloneDeep(item);
+      item.draft.request = {
+        ...item.draft.request,
+        ...cloneDeep(action.payload.request)
+      };
+      const parts = splitOnFirst(item.draft.request.url || '', '?');
+      const queryParams = parseQueryParams(parts[1]).map((param) => ({ ...param, uid: param.uid || uuid(), enabled: true, type: 'query' }));
+      const existingPathParams = (item.draft.request.params || []).filter((param) => param.type === 'path');
+      item.draft.request.params = [...queryParams, ...existingPathParams];
+    },
     collapseFullCollection: (state, action) => {
       const { collectionUid } = action.payload;
       const collection = findCollectionByUid(state.collections, collectionUid);
@@ -4001,6 +4016,7 @@ export const {
   expandCollection,
   toggleCollectionItem,
   requestUrlChanged,
+  hydrateRequestDebugDraft,
   updateItemSettings,
   updateAuth,
   addQueryParam,

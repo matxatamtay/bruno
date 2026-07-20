@@ -1,4 +1,5 @@
 const SENSITIVE_KEY = /(authorization|proxy-authorization|cookie|set-cookie|password|passwd|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|credit[-_]?card|card[-_]?number|cvv|cvc|otp|one[-_]?time[-_]?code)/i;
+const STRUCTURED_COOKIE_KEY = /^(cookie|cookies|associatedCookies)$/i;
 const MAX_STRING_LENGTH = 2 * 1024 * 1024;
 const MAX_DEPTH = 12;
 
@@ -47,7 +48,8 @@ const redactStringPayload = (value, key, depth, seen) => {
 };
 
 const sanitizeValue = (value, key = '', depth = 0, seen = new WeakSet()) => {
-  if (SENSITIVE_KEY.test(key)) return '<redacted>';
+  const structuredCookieContainer = STRUCTURED_COOKIE_KEY.test(key) && value && typeof value === 'object';
+  if (SENSITIVE_KEY.test(key) && !structuredCookieContainer) return '<redacted>';
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (typeof value === 'string') return redactStringPayload(value, key, depth, seen);
   if (depth >= MAX_DEPTH) return '<max-depth>';
@@ -70,6 +72,19 @@ const redactRecorderEvent = (event) => {
   const sanitized = sanitizeValue(event);
   if (sanitized?.data?.body && typeof sanitized.data.body === 'string') {
     sanitized.data.body = truncateString(sanitized.data.body);
+  }
+  if (sanitized?.type === 'cookie-checkpoint' && Array.isArray(sanitized.data?.cookies)) {
+    sanitized.data.cookies = sanitized.data.cookies.map((cookie) => ({ ...cookie, value: '<redacted>' }));
+  }
+  if (sanitized?.type === 'network-request-extra' && Array.isArray(sanitized.data?.associatedCookies)) {
+    sanitized.data.associatedCookies = sanitized.data.associatedCookies.map((entry) => {
+      if (entry?.cookie) return { ...entry, cookie: { ...entry.cookie, value: '<redacted>' } };
+      return entry ? { ...entry, value: '<redacted>' } : entry;
+    });
+  }
+  if (sanitized?.type === 'storage-change' && SENSITIVE_KEY.test(sanitized.data?.key || '')) {
+    if (sanitized.data.oldValue != null) sanitized.data.oldValue = '<redacted>';
+    if (sanitized.data.newValue != null) sanitized.data.newValue = '<redacted>';
   }
   return sanitized;
 };

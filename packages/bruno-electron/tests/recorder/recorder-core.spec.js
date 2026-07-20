@@ -6,6 +6,7 @@ const { redactRecorderEvent } = require('../../src/recorder/redaction');
 const { matchCollectionRequest } = require('../../src/recorder/matcher');
 const { RecorderSessionStore, isSafeArchivePath } = require('../../src/recorder/session-store');
 const { normalizeSensitiveValue } = require('../../src/recorder/RecorderManager');
+const { encryptSecretBundle, decryptSecretBundle } = require('../../src/recorder/secret-vault');
 
 describe('Bruno Web Recorder core', () => {
   describe('redaction', () => {
@@ -49,12 +50,60 @@ describe('Bruno Web Recorder core', () => {
       expect(event.data.body).toContain('"api_key":"<redacted>"');
       expect(event.data.body).not.toContain('"password":"secret"');
     });
+
+    it('redacts cookie checkpoints and sensitive browser storage changes', () => {
+      const cookieEvent = redactRecorderEvent({
+        type: 'cookie-checkpoint',
+        data: {
+          cookies: [
+            { name: 'session', value: 'cookie-secret', domain: 'api.test' },
+            { name: 'theme', value: 'dark', domain: 'api.test' }
+          ]
+        }
+      });
+      const storageEvent = redactRecorderEvent({
+        type: 'storage-change',
+        data: {
+          storageType: 'localStorage',
+          operation: 'updated',
+          key: 'accessToken',
+          oldValue: 'old-token',
+          newValue: 'new-token'
+        }
+      });
+
+      expect(cookieEvent.data.cookies.map((cookie) => cookie.value)).toEqual(['<redacted>', '<redacted>']);
+      expect(storageEvent.data.oldValue).toBe('<redacted>');
+      expect(storageEvent.data.newValue).toBe('<redacted>');
+    });
   });
 
   describe('sensitive fingerprints', () => {
     it('normalizes authorization schemes before fingerprinting', () => {
       expect(normalizeSensitiveValue('headers.Authorization', 'Bearer token-123')).toBe('token-123');
       expect(normalizeSensitiveValue('body.accessToken', 'token-123')).toBe('token-123');
+    });
+  });
+
+  describe('encrypted run secrets', () => {
+    it('round-trips a compressed AES-GCM bundle and rejects a wrong passphrase', () => {
+      const records = [{ eventId: 'request-1', entries: [{ path: 'headers.Authorization', value: 'Bearer secret-token' }] }];
+      const encrypted = encryptSecretBundle(records, 'correct horse battery staple');
+
+      expect(encrypted.toString('utf8')).not.toContain('secret-token');
+      expect(decryptSecretBundle(encrypted, 'correct horse battery staple')).toEqual(records);
+      expect(() => decryptSecretBundle(encrypted, 'wrong-passphrase')).toThrow(/passphrase/i);
+    });
+
+    it('rejects attacker-controlled KDF parameters before doing expensive work', () => {
+      const encrypted = encryptSecretBundle([], 'correct horse battery staple');
+      const envelope = JSON.parse(encrypted.toString('utf8'));
+      envelope.kdf.iterations = 999999999;
+
+      expect(() => decryptSecretBundle(
+        Buffer.from(JSON.stringify(envelope)),
+        'correct horse battery staple'
+      )).toThrow(/parameters/i);
     });
   });
 
@@ -119,7 +168,7 @@ describe('Bruno Web Recorder core', () => {
 
     afterEach(() => fs.rmSync(tempDirectory, { recursive: true, force: true }));
 
-    it('persists events and round-trips a checksummed .brurec archive', () => {
+    it('persists events and round-trips a checksummed .brunorun archive', () => {
       const manifest = store.createSession({
         name: 'Checkout failure',
         collection: { uid: 'collection-1', name: 'Shop API' }
@@ -133,11 +182,13 @@ describe('Bruno Web Recorder core', () => {
       store.writeScreenshot(manifest.id, 'shot-1', Buffer.from('fake image').toString('base64'));
       store.updateSession(manifest.id, { status: 'stopped', eventCount: 1, endedAt: new Date().toISOString() });
 
-      const archivePath = path.join(tempDirectory, 'checkout.brurec');
-      store.exportSession(manifest.id, archivePath);
+      const archivePath = path.join(tempDirectory, 'checkout.brunorun');
+      const exported = store.exportSession(manifest.id, archivePath);
       expect(fs.existsSync(archivePath)).toBe(true);
+      expect(exported.bytes).toBeGreaterThan(0);
       const zipEntries = new AdmZip(archivePath).getEntries().map((entry) => entry.entryName);
-      expect(zipEntries).toEqual(expect.arrayContaining(['manifest.json', 'events.jsonl', 'checksums.json', 'screenshots/shot-1.jpg']));
+      expect(zipEntries).toEqual(expect.arrayContaining(['manifest.json', 'events.jsonl', 'checksums.json', 'storage.json']));
+      expect(zipEntries.some((entry) => entry.startsWith('screenshots/'))).toBe(true);
 
       const imported = store.importSession(archivePath);
       expect(imported.manifest.id).not.toBe(manifest.id);
@@ -145,6 +196,86 @@ describe('Bruno Web Recorder core', () => {
       expect(imported.manifest.collection.name).toBe('Shop API');
       expect(imported.events).toHaveLength(1);
       expect(imported.events[0].data.status).toBe(500);
+    });
+
+    it('optionally embeds an encrypted secret bundle in the archive manifest', () => {
+      const manifest = store.createSession({ name: 'Secret run' });
+      const bundle = encryptSecretBundle(
+        [{ eventId: 'event-1', entries: [{ path: 'query.token', value: 'abc' }] }],
+        'strong-passphrase'
+      );
+      const archivePath = path.join(tempDirectory, 'secret-run.brunorun');
+      store.exportSession(manifest.id, archivePath, { secretBundle: bundle, secretRecordCount: 1 });
+
+      const zip = new AdmZip(archivePath);
+      expect(zip.getEntry('secrets.enc')).toBeTruthy();
+      expect(JSON.parse(zip.getEntry('manifest.json').getData().toString('utf8')).secrets).toMatchObject({ encrypted: true, recordCount: 1 });
+      const imported = store.importSession(archivePath);
+      expect(imported.manifest.secrets.encrypted).toBe(true);
+      expect(fs.existsSync(path.join(store.getSessionDirectory(imported.manifest.id), 'secrets.enc'))).toBe(true);
+    });
+
+    it('rejects an archive containing an unchecksummed extra file', () => {
+      const manifest = store.createSession({ name: 'Tampered run' });
+      const archivePath = path.join(tempDirectory, 'tampered-run.brunorun');
+      store.exportSession(manifest.id, archivePath);
+      const zip = new AdmZip(archivePath);
+      zip.addFile('surprise.txt', Buffer.from('not checksummed'));
+      zip.writeZip(archivePath);
+
+      expect(() => store.importSession(archivePath)).toThrow(/missing a checksum/i);
+    });
+
+    it('deduplicates large bodies while hydrating them when the run is opened', () => {
+      const manifest = store.createSession({ name: 'Large API run' });
+      const body = JSON.stringify({ payload: 'x'.repeat(80 * 1024) });
+      store.appendEvent(manifest.id, { id: 'request-1', type: 'network-response', data: { body } });
+      store.appendEvent(manifest.id, { id: 'request-2', type: 'network-response', data: { body } });
+
+      const loaded = store.loadSession(manifest.id);
+      expect(loaded.events[0].data.body).toBe(body);
+      expect(loaded.events[1].data.body).toBe(body);
+      expect(loaded.manifest.storage.payloadFiles).toBe(1);
+      expect(loaded.manifest.storage.payloadDeduplicatedBytes).toBeGreaterThan(0);
+
+      const archivePath = path.join(tempDirectory, 'large-run.brunorun');
+      store.exportSession(manifest.id, archivePath);
+      const payloadEntries = new AdmZip(archivePath).getEntries().filter((entry) => entry.entryName.startsWith('payloads/') && !entry.isDirectory);
+      expect(payloadEntries).toHaveLength(1);
+    });
+
+    it('deduplicates large WebSocket frame payloads', () => {
+      const manifest = store.createSession({ name: 'Socket run' });
+      const payload = JSON.stringify({ event: 'order.updated', data: 's'.repeat(80 * 1024) });
+      store.appendEvent(manifest.id, { id: 'frame-1', type: 'websocket-frame', data: { requestId: 'ws-1', payload } });
+      store.appendEvent(manifest.id, { id: 'frame-2', type: 'websocket-frame', data: { requestId: 'ws-1', payload } });
+
+      const loaded = store.loadSession(manifest.id);
+      expect(loaded.events[0].data.payload).toBe(payload);
+      expect(loaded.events[1].data.payload).toBe(payload);
+      expect(loaded.manifest.storage.payloadFiles).toBe(1);
+    });
+
+    it('truncates a single oversized body and records omitted bytes', () => {
+      const manifest = store.createSession({ name: 'Oversized response' });
+      const body = 'z'.repeat(900 * 1024);
+      store.appendEvent(manifest.id, { id: 'response-1', type: 'network-response', data: { body } });
+
+      const loaded = store.loadSession(manifest.id);
+      expect(loaded.events[0].data.body).toContain('<... truncated');
+      expect(loaded.events[0].data.body.length).toBeLessThan(body.length);
+      expect(loaded.manifest.storage.payloadOmittedBytes).toBeGreaterThan(0);
+    });
+
+    it('deduplicates identical screenshots', () => {
+      const manifest = store.createSession({ name: 'Screenshot run' });
+      const screenshot = Buffer.from('same screenshot').toString('base64');
+      const first = store.writeScreenshot(manifest.id, 'shot-1', screenshot);
+      const second = store.writeScreenshot(manifest.id, 'shot-2', screenshot);
+
+      expect(second).toBe(first);
+      expect(store.readManifest(manifest.id).storage.screenshotFiles).toBe(1);
+      expect(store.readManifest(manifest.id).storage.screenshotDeduplicatedBytes).toBeGreaterThan(0);
     });
 
     it('marks unfinished sessions as interrupted when the store is reopened', () => {

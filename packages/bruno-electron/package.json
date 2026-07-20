@@ -12,8 +12,8 @@
   "author": "Anoop M D <anoop.md1421@gmail.com> (https://helloanoop.com/)",
   "scripts": {
     "clean": "rimraf dist",
-    "dev": "electron .",
-    "debug": "electron . --inspect=9229",
+    "dev": "electron . --no-sandbox",
+    "debug": "electron . --no-sandbox --inspect=9229",
     "dist:mac": "electron-builder --mac --config electron-builder-config.js",
     "dist:win": "electron-builder --win --config electron-builder-config.js",
     "dist:linux": "electron-builder --linux AppImage --config electron-builder-config.js",

@@ -2,6 +2,9 @@ const DEBUGGER_VERSION = '1.3';
 const MAX_REQUEST_BODY_CHARS = 512 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 2 * 1024 * 1024;
 const TEXT_MIME = /json|text|xml|javascript|graphql|x-www-form-urlencoded|html|css/i;
+const MAX_STORAGE_KEYS = 100;
+const MAX_STORAGE_VALUE_CHARS = 8 * 1024;
+const MAX_STORAGE_TOTAL_CHARS = 128 * 1024;
 
 const state = {
   token: '',
@@ -14,7 +17,8 @@ const state = {
   requests: new Map(),
   pendingScreenshotActionId: null,
   screenshotTimer: null,
-  lastScreenshotAt: 0
+  lastScreenshotAt: 0,
+  storageCheckpointTimer: null
 };
 
 const debuggerTarget = () => ({ tabId: state.activeTabId });
@@ -103,6 +107,75 @@ const captureScreenshot = async (actionId) => {
   }
 };
 
+const captureStorageCheckpoint = async (reason = 'checkpoint') => {
+  if (!state.activeTabId || !state.sessionId) return;
+  try {
+    const expression = `(() => {
+      const read = (storage) => {
+        const values = {};
+        let total = 0;
+        let truncated = false;
+        for (let index = 0; index < storage.length && index < ${MAX_STORAGE_KEYS}; index += 1) {
+          const key = storage.key(index);
+          if (key == null) continue;
+          const original = String(storage.getItem(key) ?? '');
+          const value = original.slice(0, ${MAX_STORAGE_VALUE_CHARS});
+          total += key.length + value.length;
+          if (total > ${MAX_STORAGE_TOTAL_CHARS}) { truncated = true; break; }
+          values[key] = value;
+          if (value.length < original.length) truncated = true;
+        }
+        if (storage.length > ${MAX_STORAGE_KEYS}) truncated = true;
+        return { values, truncated, keyCount: storage.length };
+      };
+      return {
+        url: location.href,
+        origin: location.origin,
+        localStorage: read(localStorage),
+        sessionStorage: read(sessionStorage)
+      };
+    })()`;
+    const result = await debuggerCommand('Runtime.evaluate', { expression, returnByValue: true });
+    const snapshot = result.result?.value;
+    if (!snapshot) return;
+    queueEvent({
+      type: 'storage-checkpoint',
+      data: {
+        reason,
+        url: snapshot.url,
+        origin: snapshot.origin,
+        localStorage: snapshot.localStorage,
+        sessionStorage: snapshot.sessionStorage
+      }
+    });
+    const cookieResult = await debuggerCommand('Network.getCookies', { urls: [snapshot.url] });
+    queueEvent({
+      type: 'cookie-checkpoint',
+      data: {
+        reason,
+        url: snapshot.url,
+        cookies: (cookieResult.cookies || []).slice(0, 100).map((cookie) => ({
+          name: cookie.name,
+          value: String(cookie.value || '').slice(0, MAX_STORAGE_VALUE_CHARS),
+          domain: cookie.domain,
+          path: cookie.path,
+          expires: cookie.expires,
+          httpOnly: cookie.httpOnly,
+          secure: cookie.secure,
+          sameSite: cookie.sameSite
+        }))
+      }
+    });
+  } catch (error) {
+    queueEvent({ type: 'recorder', data: { level: 'warning', message: `State checkpoint failed: ${error.message}` } });
+  }
+};
+
+const scheduleStorageCheckpoint = (reason) => {
+  clearTimeout(state.storageCheckpointTimer);
+  state.storageCheckpointTimer = setTimeout(() => captureStorageCheckpoint(reason), 500);
+};
+
 const notifyContentScript = async (tabId, message) => {
   try {
     await callChrome(chrome.tabs.sendMessage, tabId, message);
@@ -147,6 +220,19 @@ const startRecording = async ({ tabId, port, token }) => {
       debuggerCommand('Log.enable')
     ]);
 
+    // DOMStorage is not exposed by every chrome.debugger target/version.
+    // State checkpoints use Runtime.evaluate as the portable fallback, so
+    // failure to enable this optional event domain must not abort recording.
+    await debuggerCommand('DOMStorage.enable').catch((error) => {
+      queueEvent({
+        type: 'recorder',
+        data: {
+          level: 'warning',
+          message: `Live DOM storage events unavailable; using checkpoints: ${error.message}`
+        }
+      });
+    });
+
     await notifyContentScript(tabId, { type: 'BRUNO_RECORDER_START', sessionId: state.sessionId });
     const tab = await callChrome(chrome.tabs.get, tabId);
     queueEvent({
@@ -154,6 +240,7 @@ const startRecording = async ({ tabId, port, token }) => {
       data: { level: 'info', message: 'Chrome tab attached', title: tab.title, url: tab.url }
     });
     queueEvent({ type: 'navigation', data: { url: tab.url, title: tab.title, transition: 'attach' } });
+    await captureStorageCheckpoint('attach');
     captureScreenshot(null);
     return { recording: true, sessionId: state.sessionId, tabId };
   } catch (error) {
@@ -193,7 +280,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     };
     queueEvent(event);
-    if (event.type === 'action') captureScreenshot(event.id);
+    if (event.type === 'action') {
+      captureScreenshot(event.id);
+      scheduleStorageCheckpoint(`action:${event.data?.kind || 'unknown'}`);
+    }
     return false;
   }
 
@@ -232,6 +322,17 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
           initiator: params.initiator,
           hasUserGesture: params.hasUserGesture,
           redirectResponse: params.redirectResponse || null
+        }
+      });
+    } else if (method === 'Network.requestWillBeSentExtraInfo') {
+      queueEvent({
+        type: 'network-request-extra',
+        data: {
+          requestId: params.requestId,
+          headers: params.headers || {},
+          associatedCookies: params.associatedCookies || [],
+          connectTiming: params.connectTiming || null,
+          clientSecurityState: params.clientSecurityState || null
         }
       });
     } else if (method === 'Network.responseReceived') {
@@ -286,11 +387,111 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
           corsErrorStatus: params.corsErrorStatus
         }
       });
+    } else if (method === 'Network.webSocketCreated') {
+      queueEvent({
+        type: 'websocket-created',
+        data: {
+          requestId: params.requestId,
+          url: params.url,
+          initiator: params.initiator
+        }
+      });
+    } else if (method === 'Network.webSocketWillSendHandshakeRequest') {
+      queueEvent({
+        type: 'websocket-handshake',
+        data: {
+          requestId: params.requestId,
+          direction: 'outgoing',
+          timestamp: params.timestamp,
+          wallTime: params.wallTime,
+          headers: params.request?.headers || {}
+        }
+      });
+    } else if (method === 'Network.webSocketHandshakeResponseReceived') {
+      queueEvent({
+        type: 'websocket-handshake',
+        data: {
+          requestId: params.requestId,
+          direction: 'incoming',
+          timestamp: params.timestamp,
+          status: params.response?.status,
+          statusText: params.response?.statusText,
+          headers: params.response?.headers || {},
+          headersText: params.response?.headersText || null
+        }
+      });
+    } else if (method === 'Network.webSocketFrameSent' || method === 'Network.webSocketFrameReceived') {
+      const frame = params.response || {};
+      queueEvent({
+        type: 'websocket-frame',
+        data: {
+          requestId: params.requestId,
+          direction: method === 'Network.webSocketFrameSent' ? 'outgoing' : 'incoming',
+          timestamp: params.timestamp,
+          opcode: frame.opcode,
+          masked: frame.mask,
+          base64Encoded: Number(frame.opcode) === 2,
+          payload: frame.payloadData || ''
+        }
+      });
+    } else if (method === 'Network.webSocketClosed') {
+      queueEvent({
+        type: 'websocket-closed',
+        data: {
+          requestId: params.requestId,
+          timestamp: params.timestamp
+        }
+      });
+    } else if (method === 'Network.webSocketFrameError') {
+      queueEvent({
+        type: 'websocket-error',
+        data: {
+          requestId: params.requestId,
+          timestamp: params.timestamp,
+          errorMessage: params.errorMessage
+        }
+      });
+    } else if (method === 'DOMStorage.domStorageItemAdded' || method === 'DOMStorage.domStorageItemUpdated') {
+      queueEvent({
+        type: 'storage-change',
+        data: {
+          origin: params.storageId?.securityOrigin,
+          storageType: params.storageId?.isLocalStorage ? 'localStorage' : 'sessionStorage',
+          operation: method.endsWith('Added') ? 'added' : 'updated',
+          key: params.key,
+          oldValue: params.oldValue ?? null,
+          newValue: String(params.newValue ?? '').slice(0, MAX_STORAGE_VALUE_CHARS),
+          truncated: String(params.newValue ?? '').length > MAX_STORAGE_VALUE_CHARS
+        }
+      });
+    } else if (method === 'DOMStorage.domStorageItemRemoved') {
+      queueEvent({
+        type: 'storage-change',
+        data: {
+          origin: params.storageId?.securityOrigin,
+          storageType: params.storageId?.isLocalStorage ? 'localStorage' : 'sessionStorage',
+          operation: 'removed',
+          key: params.key,
+          oldValue: params.oldValue ?? null,
+          newValue: null
+        }
+      });
+    } else if (method === 'DOMStorage.domStorageItemsCleared') {
+      queueEvent({
+        type: 'storage-change',
+        data: {
+          origin: params.storageId?.securityOrigin,
+          storageType: params.storageId?.isLocalStorage ? 'localStorage' : 'sessionStorage',
+          operation: 'cleared'
+        }
+      });
     } else if (method === 'Page.frameNavigated' && !params.frame?.parentId) {
       queueEvent({ type: 'navigation', frameId: params.frame.id, data: { url: params.frame.url, title: params.frame.name, transition: 'navigate' } });
+      scheduleStorageCheckpoint('navigation');
       captureScreenshot(null);
     } else if (method === 'Page.navigatedWithinDocument') {
       queueEvent({ type: 'navigation', frameId: params.frameId, data: { url: params.url, transition: 'history' } });
+      scheduleStorageCheckpoint('history-navigation');
       captureScreenshot(null);
     } else if (method === 'Runtime.exceptionThrown') {
       const details = params.exceptionDetails || {};

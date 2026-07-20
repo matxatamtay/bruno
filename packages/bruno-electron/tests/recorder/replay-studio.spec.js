@@ -9,9 +9,11 @@ const collection = { uid: 'shop-api', name: 'Shop API', pathname: '/tmp/shop-api
 const session = {
   manifest: { id: 'session-1', name: 'Checkout' },
   events: [
-    { type: 'network-request', timestamp: 1, data: { requestId: 'r1', method: 'POST', url: 'https://api.shop.test/login', resourceType: 'Fetch', headers: {}, body: '{"email":"a@b.com","password":"<redacted>"}' } },
-    { type: 'network-response', timestamp: 2, data: { requestId: 'r1', status: 200, duration: 120, body: '{"accessToken":"token-123456789","user":{"id":"usr_12345"}}' } },
-    { type: 'network-request', timestamp: 3, data: { requestId: 'r2', method: 'POST', url: 'https://api.shop.test/users/usr_12345/orders', resourceType: 'Fetch', headers: { Authorization: 'Bearer token-123456789' }, body: '{"amount":42}' } },
+    { id: 'request-event-r1', type: 'network-request', timestamp: 1, data: { requestId: 'r1', method: 'POST', url: 'https://api.shop.test/login', resourceType: 'Fetch', headers: {}, body: '{"email":"a@b.com","password":"<redacted>"}' } },
+    { type: 'network-response', timestamp: 2, data: { requestId: 'r1', status: 200, duration: 120, body: '{"accessToken":"<redacted>","user":{"id":"usr_12345"}}', sensitiveFingerprints: [{ path: 'body.accessToken', fingerprint: 'access-token-fingerprint' }] } },
+    { id: 'state-before-r2', type: 'storage-checkpoint', timestamp: 2.5, data: { origin: 'https://api.shop.test', localStorage: { values: { userId: 'usr_12345', accessToken: '<redacted>' }, truncated: false }, sessionStorage: { values: { currency: 'THB' }, truncated: false } } },
+    { id: 'request-event-r2', type: 'network-request', timestamp: 3, data: { requestId: 'r2', method: 'POST', url: 'https://api.shop.test/users/usr_12345/orders', resourceType: 'Fetch', headers: { Authorization: '<redacted>' }, body: '{"amount":42}', sensitiveFingerprints: [{ path: 'headers.Authorization', fingerprint: 'access-token-fingerprint' }] } },
+    { id: 'request-extra-r2', type: 'network-request-extra', timestamp: 3.1, data: { requestId: 'r2', headers: { Cookie: '<redacted>' }, sensitiveFingerprints: [{ path: 'headers.Cookie', fingerprint: 'cookie-fingerprint' }] } },
     { type: 'network-response', timestamp: 4, data: { requestId: 'r2', status: 201, duration: 240, body: '{"id":"ord_98765","status":"pending"}' } },
     { type: 'network-request', timestamp: 5, data: { requestId: 'asset', method: 'GET', url: 'https://api.shop.test/logo.png', resourceType: 'Image', headers: {} } }
   ]
@@ -111,5 +113,15 @@ describe('Replay Studio local core', () => {
     expect(scenario.steps[0].extracts).toEqual(expect.arrayContaining([expect.objectContaining({ variable: 'accessToken', sensitivity: 'secret' })]));
     expect(scenario.steps[1].overrides.bindings).toEqual(expect.arrayContaining([expect.objectContaining({ variable: 'accessToken' })]));
     expect(scenario.steps[1].assertions).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'status', expected: 201 })]));
+    expect(scenario.steps[1].capturedRequest).toMatchObject({
+      method: 'POST',
+      url: 'https://api.shop.test/users/usr_12345/orders',
+      body: { mode: 'json' }
+    });
+    expect(scenario.steps[1].capturedRequest.headers).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Authorization' })]));
+    expect(scenario.steps[1].capturedRequest.headers).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Cookie' })]));
+    expect(scenario.steps[1].capturedRequest.state.snapshot).toMatchObject({ localStorage: { userId: 'usr_12345' }, sessionStorage: { currency: 'THB' } });
+    expect(scenario.steps[1].capturedRequest.source).toMatchObject({ eventId: 'request-event-r2', requestId: 'r2' });
+    expect(scenario.steps[1].capturedRequest.source.eventIds).toContain('state-before-r2');
   });
 });

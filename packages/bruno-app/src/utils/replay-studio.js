@@ -2,6 +2,150 @@ import get from 'lodash/get';
 import set from 'lodash/set';
 
 const SECRET_KEY = /token|secret|password|authorization|cookie|session|api[-_]?key/i;
+const REDACTED_VALUE = /<redacted>|•••/i;
+
+const mergeCapturedJson = (current, captured, key = '', allowSecrets = false) => {
+  if ((!allowSecrets && SECRET_KEY.test(key)) || (typeof captured === 'string' && REDACTED_VALUE.test(captured))) {
+    return current !== undefined ? current : captured;
+  }
+  if (Array.isArray(captured)) {
+    return captured.map((value, index) => mergeCapturedJson(Array.isArray(current) ? current[index] : undefined, value, key, allowSecrets));
+  }
+  if (captured && typeof captured === 'object') {
+    return Object.fromEntries(Object.entries(captured).map(([childKey, value]) => [
+      childKey,
+      mergeCapturedJson(current && typeof current === 'object' ? current[childKey] : undefined, value, childKey, allowSecrets)
+    ]));
+  }
+  return captured;
+};
+
+const parseJsonBody = (value) => {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try { return JSON.parse(value); } catch { return null; }
+};
+
+const mergeCapturedVariables = (currentVars = {}, snapshot = {}, allowSecrets = false) => {
+  const existing = currentVars.req || [];
+  const capturedEntries = [
+    ...Object.entries(snapshot.localStorage || {}).map(([name, value]) => ({ name, value, source: 'localStorage' })),
+    ...Object.entries(snapshot.sessionStorage || {}).map(([name, value]) => ({ name, value, source: 'sessionStorage' }))
+  ].slice(0, 200);
+  const merged = existing.map((entry) => ({ ...entry }));
+  for (const captured of capturedEntries) {
+    const match = merged.find((entry) => entry.name === captured.name);
+    const redacted = REDACTED_VALUE.test(String(captured.value || ''));
+    const protectedValue = SECRET_KEY.test(captured.name) && !allowSecrets;
+    if (match) {
+      if (!redacted && !protectedValue) {
+        match.value = captured.value;
+        match.enabled = true;
+        match.description = `Captured from browser ${captured.source}`;
+      }
+    } else if (!redacted && !protectedValue) {
+      merged.push({
+        uid: `captured-${captured.source}-${captured.name}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 160),
+        name: captured.name,
+        value: captured.value,
+        enabled: true,
+        description: `Captured from browser ${captured.source}`
+      });
+    }
+  }
+  return { ...currentVars, req: merged };
+};
+
+export const buildCapturedDebugRequest = (item, capturedRequest) => {
+  const current = (item?.draft || item)?.request || {};
+  if (!capturedRequest) return current;
+  const allowSecrets = Boolean(capturedRequest.state?.secretsAvailable);
+  const currentHeaders = current.headers || [];
+  const capturedHeaders = (capturedRequest.headers || []).map((header) => {
+    const existing = currentHeaders.find((candidate) => String(candidate.name || '').toLowerCase() === String(header.name || '').toLowerCase());
+    const isSecret = SECRET_KEY.test(header.name || '');
+    if ((isSecret && !allowSecrets) || REDACTED_VALUE.test(String(header.value || ''))) {
+      return existing ? { ...existing } : null;
+    }
+    return { ...header, uid: existing?.uid || header.uid };
+  }).filter(Boolean);
+  currentHeaders.forEach((header) => {
+    if (!SECRET_KEY.test(header.name || '')) return;
+    if (!capturedHeaders.some((candidate) => String(candidate.name || '').toLowerCase() === String(header.name || '').toLowerCase())) {
+      capturedHeaders.push({ ...header });
+    }
+  });
+
+  const capturedBody = capturedRequest.body || { mode: 'none', content: '' };
+  const body = { ...(current.body || {}), mode: capturedBody.mode || 'none' };
+  if (body.mode === 'json') {
+    const currentJson = parseJsonBody(current.body?.json) || {};
+    const recordedJson = parseJsonBody(capturedBody.content) || {};
+    body.json = JSON.stringify(mergeCapturedJson(currentJson, recordedJson, '', allowSecrets), null, 2);
+  } else if (body.mode !== 'none') {
+    const currentContent = current.body?.[body.mode];
+    body[body.mode] = REDACTED_VALUE.test(String(capturedBody.content || '')) && currentContent != null
+      ? currentContent
+      : capturedBody.content;
+  }
+
+  return {
+    ...current,
+    method: capturedRequest.method || current.method,
+    url: capturedRequest.url || current.url,
+    headers: capturedHeaders,
+    body,
+    vars: mergeCapturedVariables(current.vars, capturedRequest.state?.snapshot, allowSecrets)
+  };
+};
+
+export const applyCapturedSecrets = (capturedRequest, entries = []) => {
+  const next = JSON.parse(JSON.stringify(capturedRequest || {}));
+  for (const entry of entries || []) {
+    if (entry.path?.startsWith('headers.')) {
+      const name = entry.path.slice('headers.'.length);
+      const header = (next.headers || []).find((candidate) => String(candidate.name || '').toLowerCase() === name.toLowerCase());
+      if (header) header.value = entry.value;
+    } else if (entry.path?.startsWith('query.')) {
+      try {
+        const url = new URL(next.url);
+        url.searchParams.set(entry.path.slice('query.'.length), entry.value);
+        next.url = url.toString();
+      } catch {}
+    } else if (entry.path?.startsWith('cookies.')) {
+      const cookieName = entry.path.slice('cookies.'.length);
+      next.headers = next.headers || [];
+      let header = next.headers.find((candidate) => String(candidate.name || '').toLowerCase() === 'cookie');
+      if (!header) {
+        header = { name: 'Cookie', value: '', enabled: true };
+        next.headers.push(header);
+      }
+      const cookies = new Map(String(header.value || '').split(';').map((part) => part.trim()).filter(Boolean).map((part) => {
+        const separator = part.indexOf('=');
+        return separator < 0 ? [part, ''] : [part.slice(0, separator), part.slice(separator + 1)];
+      }));
+      cookies.set(cookieName, entry.value);
+      header.value = [...cookies.entries()].map(([name, value]) => `${name}=${value}`).join('; ');
+      const stateCookie = next.state?.snapshot?.cookies?.find((cookie) => cookie.name === cookieName);
+      if (stateCookie) stateCookie.value = entry.value;
+    } else if (entry.path?.startsWith('storage.')) {
+      next.state = next.state || {};
+      next.state.snapshot = next.state.snapshot || {};
+      set(next.state.snapshot, entry.path.slice('storage.'.length), entry.value);
+    } else if (entry.path?.startsWith('body.') || entry.path?.startsWith('payload.')) {
+      const parsed = parseJsonBody(next.body?.content);
+      if (!parsed) continue;
+      set(parsed, entry.path.replace(/^(body|payload)\./, ''), entry.value);
+      next.body.content = JSON.stringify(parsed, null, 2);
+      next.body.mode = 'json';
+    }
+  }
+  next.state = {
+    ...(next.state || {}),
+    secretsAvailable: Boolean(entries?.length)
+  };
+  return next;
+};
 
 export const replayResponseData = (response) => {
   const value = response?.data ?? response?.body ?? response?.response?.data ?? null;
