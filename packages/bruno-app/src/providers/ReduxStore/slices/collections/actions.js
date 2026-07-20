@@ -1868,7 +1868,7 @@ const DEFAULT_APP_STARTER = `<!DOCTYPE html>
   <script>
     const out = document.getElementById('out');
     document.getElementById('refresh').addEventListener('click', async () => {
-      const requests = await ctx.listRequests();
+      const requests = await bru.ctx.listRequests();
       out.textContent = requests.map(r => \`\${r.method || r.type}  \${r.name}\`).join('\\n') || '(no requests)';
     });
   </script>
