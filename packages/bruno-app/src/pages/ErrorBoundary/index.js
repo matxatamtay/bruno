@@ -2,18 +2,37 @@ import React from 'react';
 
 import Bruno from 'components/Bruno/index';
 
+const RESIZE_OBSERVER_LOOP_ERRORS = new Set([
+  'ResizeObserver loop limit exceeded',
+  'ResizeObserver loop completed with undelivered notifications.'
+]);
+
+export const isIgnorableGlobalError = (message) => RESIZE_OBSERVER_LOOP_ERRORS.has(String(message || '').trim());
+
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
 
     this.state = { hasError: false, clearCaches: false };
+    this.handleWindowError = this.handleWindowError.bind(this);
   }
 
   componentDidMount() {
-    // Add a global error event listener to capture client-side errors
-    window.onerror = (message, source, lineno, colno, error) => {
-      this.setState({ hasError: true, error });
-    };
+    window.addEventListener('error', this.handleWindowError);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener('error', this.handleWindowError);
+  }
+
+  handleWindowError(event) {
+    if (isIgnorableGlobalError(event?.message)) {
+      event.preventDefault?.();
+      return;
+    }
+
+    const error = event?.error || new Error(String(event?.message || 'Unknown renderer error'));
+    this.setState({ hasError: true, error });
   }
 
   componentDidCatch(error, errorInfo) {

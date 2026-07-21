@@ -6,6 +6,26 @@ const os = require('os');
 const { initializeShellEnv, waitForShellEnv } = require('./store/shell-env-state');
 const { percentageToZoomLevel } = require('@usebruno/common');
 
+const flowCrashDebug = (stage, details = {}) => {
+  console.error(`[FLOW-DEBUG][process][${new Date().toISOString()}] ${stage}`, details);
+};
+
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  flowCrashDebug('uncaught-exception-monitor', {
+    origin,
+    name: error?.name,
+    message: error?.message,
+    stack: error?.stack
+  });
+});
+process.on('unhandledRejection', (reason) => {
+  flowCrashDebug('unhandled-rejection', {
+    name: reason?.name,
+    message: reason?.message || String(reason),
+    stack: reason?.stack
+  });
+});
+
 if (isDev) {
   if (!fs.existsSync(path.join(__dirname, '../../bruno-js/src/sandbox/bundle-browser-rollup.js'))) {
     console.log('JS Sandbox libraries have not been bundled yet');
@@ -49,6 +69,8 @@ const registerOpenAPISyncIpc = require('./ipc/openapi-sync');
 const registerApiIntelligenceIpc = require('./ipc/api-intelligence');
 const registerAiIpc = require('./ipc/ai');
 const registerAiAutocompleteIpc = require('./ipc/ai/autocomplete');
+const registerFlowIpc = require('./ipc/flow');
+const registerFlowRuntimeIpc = require('./ipc/flow-runtime');
 const { registerMountIpc } = require('./ipc/mount');
 const collectionWatcher = require('./app/collection-watcher');
 const WorkspaceWatcher = require('./app/workspace-watcher');
@@ -65,6 +87,9 @@ const { cookiesStore } = require('./store/cookies');
 const SystemMonitor = require('./app/system-monitor');
 const { getIsRunningInRosetta } = require('./utils/arch');
 const { handleAppProtocolUrl, getAppProtocolUrlFromArgv } = require('./utils/deeplink');
+const { registerAutomationServices } = require('./services/automation-service-registry');
+const { BrunoMcpServerManager } = require('./mcp/server');
+const { registerMcpIpc } = require('./mcp/ipc');
 
 const systemMonitor = new SystemMonitor();
 const terminalManager = new TerminalManager();
@@ -73,12 +98,13 @@ const workspaceWatcher = new WorkspaceWatcher();
 const apiSpecWatcher = new ApiSpecWatcher();
 
 // Reference: https://content-security-policy.com/
+// Temporary compatibility allowance for the current Flow Studio runtime bundle.
 const contentSecurityPolicy = [
   'default-src \'self\'',
   'connect-src \'self\' https://*.posthog.com',
   'font-src \'self\' https: data:;',
   'frame-src data:',
-  'script-src \'self\' data:',
+  'script-src \'self\' \'unsafe-eval\' data:',
   // this has been commented out to make oauth2 work
   // "form-action 'none'",
   // we make an exception and allow http for images so that
@@ -97,6 +123,8 @@ const isLinux = process.platform === 'linux';
 
 let mainWindow;
 let appProtocolUrl;
+let flowPersistenceService;
+let mcpServerManager;
 
 // Helper function to save zoom percentage to preferences and notify renderer
 const saveZoomPreferences = async (percentage) => {
@@ -131,7 +159,9 @@ const focusMainWindow = () => {
 const closeAllWatchers = () => Promise.allSettled([
   collectionWatcher.closeAllWatchers(),
   workspaceWatcher.closeAllWatchers(),
-  apiSpecWatcher.closeAllWatchers()
+  apiSpecWatcher.closeAllWatchers(),
+  flowPersistenceService?.closeAll(),
+  mcpServerManager?.stop()
 ]);
 
 // Parse protocol URL from command line arguments (if any)
@@ -481,6 +511,16 @@ app.on('ready', async () => {
     });
   });
 
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    flowCrashDebug('render-process-gone', details);
+  });
+  mainWindow.webContents.on('unresponsive', () => {
+    flowCrashDebug('renderer-unresponsive');
+  });
+  mainWindow.webContents.on('responsive', () => {
+    console.log(`[FLOW-DEBUG][process][${new Date().toISOString()}] renderer-responsive`);
+  });
+
   mainWindow.webContents.on('did-finish-load', async () => {
     try {
       let ogSend = mainWindow.webContents.send;
@@ -508,11 +548,37 @@ app.on('ready', async () => {
     });
   });
 
-  // register all ipc handlers
-  registerNetworkIpc(mainWindow);
+  // Register shared automation cores before transport-specific callers use them.
+  const networkServices = registerNetworkIpc(mainWindow);
+  const flowServices = registerFlowIpc(mainWindow);
+  const automationServices = {
+    ...networkServices,
+    ...flowServices,
+    ...registerFlowRuntimeIpc(mainWindow, {
+      requestExecutionService: networkServices.requestExecutionService,
+      flowPersistenceService: flowServices.flowPersistenceService
+    })
+  };
+  flowPersistenceService = automationServices.flowPersistenceService;
+  registerAutomationServices(automationServices);
+  mcpServerManager = new BrunoMcpServerManager({
+    appDataPath: app.getPath('userData'),
+    getPreferences,
+    savePreferences,
+    flowPersistenceService: automationServices.flowPersistenceService,
+    flowRuntimeService: automationServices.flowRuntimeService,
+    requestExecutionService: automationServices.requestExecutionService,
+    mainWindow
+  });
+  registerMcpIpc(mainWindow, mcpServerManager);
+  mcpServerManager.start().catch((error) => {
+    console.error('Unable to start Bruno MCP:', error.message);
+  });
   registerGlobalEnvironmentsIpc(mainWindow, globalEnvironmentsManager);
   registerCollectionsIpc(mainWindow, collectionWatcher);
-  registerPreferencesIpc(mainWindow, collectionWatcher);
+  registerPreferencesIpc(mainWindow, {
+    onPreferencesSaved: (preferences) => mcpServerManager.preferencesChanged(preferences)
+  });
   registerSnapshotIpc();
   registerWorkspaceIpc(mainWindow, workspaceWatcher);
   registerApiSpecIpc(mainWindow, apiSpecWatcher);

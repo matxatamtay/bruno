@@ -35,18 +35,8 @@ async function recursiveCopy(src: string, dest: string) {
   if (!await existsAsync(src)) {
     throw new Error(`${src} doesn't exist`);
   }
-
-  const files = await fs.promises.readdir(src, {
-    recursive: true,
-    withFileTypes: true
-  });
-
-  for (const file of files) {
-    if (!file.isFile()) continue;
-    const fullPath = path.join(src, file.name);
-    const fullDestPath = path.join(dest, file.name);
-    await fs.promises.copyFile(fullPath, fullDestPath);
-  }
+  await fs.promises.mkdir(dest, { recursive: true });
+  await fs.promises.cp(src, dest, { recursive: true, force: true });
 }
 
 const TRACING_OPTIONS = { screenshots: true, snapshots: true, sources: true };
@@ -281,8 +271,10 @@ export const test = baseTest.extend<
           }
         }
 
+        const electronArgs = [electronAppPath, '--disable-gpu'];
+        if (process.env.PLAYWRIGHT_DISABLE_SANDBOX === 'true') electronArgs.push('--no-sandbox');
         const app = await playwright._electron.launch({
-          args: [electronAppPath, '--disable-gpu'],
+          args: electronArgs,
           env: {
             ...process.env,
             ELECTRON_USER_DATA_PATH: userDataPath,

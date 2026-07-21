@@ -142,6 +142,22 @@ describe('serializeSnapshot workspace tab restoration', () => {
     });
   });
 
+  it('records Flow Studio as the active workspace tab for restart restoration', async () => {
+    const scratchCollectionUid = 'scratch-1';
+    const state = makeState();
+    state.workspaces.workspaces[0].scratchCollectionUid = scratchCollectionUid;
+    state.tabs.tabs = [{ uid: `${scratchCollectionUid}-flows`, collectionUid: scratchCollectionUid, type: 'workspaceFlowStudio' }];
+    state.tabs.activeTabUid = `${scratchCollectionUid}-flows`;
+
+    const snapshot = await serializeSnapshot(state, {
+      getExistingSnapshot: async () => null
+    });
+
+    expect(snapshot.workspaces[0]).toMatchObject({
+      activeWorkspaceTabType: 'workspaceFlowStudio'
+    });
+  });
+
   it('does not record an active workspace tab type when a non-workspace tab is focused', async () => {
     const scratchCollectionUid = 'scratch-1';
     const state = makeState();

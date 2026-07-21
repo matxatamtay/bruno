@@ -40,6 +40,11 @@ const { registerWsEventHandlers } = require('./ws-event-handlers');
 const { getCertsAndProxyConfig, buildCertsAndProxyConfig } = require('./cert-utils');
 const { easterEggResponse } = require('../../utils/woof');
 const { buildFormUrlEncodedPayload, isFormData, extractBoundaryFromContentType } = require('@usebruno/common').utils;
+const { createRequestExecutionService } = require('../../services/request-execution-service');
+const { createExecutionEventContext } = require('../../services/request-execution/execution-event-context');
+const { createHttpGraphqlAdapter } = require('../../services/request-execution/adapters/http-graphql-adapter');
+const { linkAbortSignal, delayWithSignal, attachDeferredStreamCleanup } = require('../../services/request-execution/abort');
+const { createRunnerExecutionEventContext } = require('../../services/request-execution/runner-event-context');
 
 const ERROR_OCCURRED_WHILE_EXECUTING_REQUEST = 'Error occurred while executing the request!';
 
@@ -454,14 +459,12 @@ const fetchGqlSchemaHandler = async (event, endpoint, environment, _request, col
 };
 
 const registerNetworkIpc = (mainWindow) => {
-  const onConsoleLog = (type, args) => {
-    console[type](...args);
-
-    mainWindow.webContents.send('main:console-log', {
-      type,
-      args
-    });
-  };
+  const forwardRendererEvent = (channel, payload) => mainWindow.webContents.send(channel, payload);
+  const createRendererEventContext = (metadata = {}) => createExecutionEventContext({
+    metadata,
+    forwardLegacyEvent: forwardRendererEvent
+  });
+  const rendererEventContext = createRendererEventContext();
 
   const notifyScriptExecution = ({
     channel, // 'main:run-request-event' | 'main:run-folder-event'
@@ -469,11 +472,12 @@ const registerNetworkIpc = (mainWindow) => {
     scriptType, // 'pre-request' | 'post-response' | 'test'
     error, // optional Error
     collectionPath, // optional path to the collection root
-    scriptMetadata // optional metadata for line mapping
+    scriptMetadata, // optional metadata for line mapping
+    eventContext = rendererEventContext
   }) => {
     const errorContext = error ? formatErrorWithContextV2(error, scriptType, scriptMetadata, collectionPath) : null;
 
-    mainWindow.webContents.send(channel, {
+    eventContext.emitLegacy(channel, {
       type: `${scriptType}-script-execution`,
       ...basePayload,
       errorMessage: error ? (error.message || `An error occurred in ${scriptType.replace('-', ' ')} script`) : null,
@@ -514,10 +518,10 @@ const registerNetworkIpc = (mainWindow) => {
     };
   };
 
-  const sendVariableUpdates = (result, { collectionUid, requestUid, collection }) => {
+  const sendVariableUpdates = (result, { collectionUid, requestUid, collection }, eventContext = rendererEventContext) => {
     if (collection?.__replayStudioLocalOnly) return;
     if (result.runtimeVariables) {
-      mainWindow.webContents.send('main:runtime-variables-update', {
+      eventContext.emitLegacy('main:runtime-variables-update', {
         runtimeVariables: result.runtimeVariables,
         requestUid,
         collectionUid
@@ -525,7 +529,7 @@ const registerNetworkIpc = (mainWindow) => {
     }
 
     if (result.envVariables) {
-      mainWindow.webContents.send('main:script-environment-update', {
+      eventContext.emitLegacy('main:script-environment-update', {
         envVariables: result.envVariables,
         requestUid,
         collectionUid
@@ -533,7 +537,7 @@ const registerNetworkIpc = (mainWindow) => {
     }
 
     if (result.globalEnvironmentVariables) {
-      mainWindow.webContents.send('main:global-environment-variables-update', {
+      eventContext.emitLegacy('main:global-environment-variables-update', {
         globalEnvironmentVariables: result.globalEnvironmentVariables,
         requestUid,
         collectionUid
@@ -542,7 +546,7 @@ const registerNetworkIpc = (mainWindow) => {
     }
 
     if (result.collectionVariables) {
-      mainWindow.webContents.send('main:collection-variables-update', {
+      eventContext.emitLegacy('main:collection-variables-update', {
         collectionVariables: result.collectionVariables,
         requestUid,
         collectionUid
@@ -551,7 +555,7 @@ const registerNetworkIpc = (mainWindow) => {
     }
   };
 
-  const resetOauth2Credentials = ({ oauth2CredentialsToReset, request, collectionUid }) => {
+  const resetOauth2Credentials = ({ oauth2CredentialsToReset, request, collectionUid }, eventContext = rendererEventContext) => {
     if (!oauth2CredentialsToReset?.length) return;
     for (const credentialId of oauth2CredentialsToReset) {
       clearOauth2CredentialsByCredentialsId({ collectionUid, credentialsId: credentialId });
@@ -566,7 +570,7 @@ const registerNetworkIpc = (mainWindow) => {
           }
         }
       }
-      mainWindow.webContents.send('main:credentials-clear', { collectionUid, credentialsId: credentialId });
+      eventContext.emitLegacy('main:credentials-clear', { collectionUid, credentialsId: credentialId });
     }
   };
 
@@ -580,7 +584,8 @@ const registerNetworkIpc = (mainWindow) => {
     runtimeVariables,
     processEnvVars,
     scriptingConfig,
-    runRequestByItemPathname
+    runRequestByItemPathname,
+    eventContext = rendererEventContext
   ) => {
     // run pre-request script
     let scriptResult;
@@ -595,18 +600,18 @@ const registerNetworkIpc = (mainWindow) => {
         envVars,
         runtimeVariables,
         collectionPath,
-        onConsoleLog,
+        eventContext.onConsoleLog,
         processEnvVars,
         scriptingConfig,
         runRequestByItemPathname,
         collectionName
       );
 
-      sendVariableUpdates(scriptResult, { collectionUid, requestUid, collection });
-      resetOauth2Credentials({ oauth2CredentialsToReset: scriptResult.oauth2CredentialsToReset, request, collectionUid });
+      sendVariableUpdates(scriptResult, { collectionUid, requestUid, collection }, eventContext);
+      resetOauth2Credentials({ oauth2CredentialsToReset: scriptResult.oauth2CredentialsToReset, request, collectionUid }, eventContext);
 
       const domainsWithCookies = await getDomainsWithCookies();
-      mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookies)));
+      eventContext.emitLegacy('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookies)));
     }
 
     // interpolate variables inside request
@@ -677,7 +682,8 @@ const registerNetworkIpc = (mainWindow) => {
     runtimeVariables,
     processEnvVars,
     scriptingConfig,
-    runRequestByItemPathname
+    runRequestByItemPathname,
+    eventContext = rendererEventContext
   ) => {
     // run post-response vars
     const postResponseVars = get(request, 'vars.res', []);
@@ -694,11 +700,11 @@ const registerNetworkIpc = (mainWindow) => {
       );
 
       if (result) {
-        sendVariableUpdates(result, { collectionUid, requestUid, collection });
+        sendVariableUpdates(result, { collectionUid, requestUid, collection }, eventContext);
       }
 
       if (result?.error) {
-        mainWindow.webContents.send('main:display-error', result.error);
+        eventContext.emitLegacy('main:display-error', result.error);
       }
     }
 
@@ -715,23 +721,23 @@ const registerNetworkIpc = (mainWindow) => {
         envVars,
         runtimeVariables,
         collectionPath,
-        onConsoleLog,
+        eventContext.onConsoleLog,
         processEnvVars,
         scriptingConfig,
         runRequestByItemPathname,
         collectionName
       );
 
-      sendVariableUpdates(scriptResult, { collectionUid, requestUid, collection });
-      resetOauth2Credentials({ oauth2CredentialsToReset: scriptResult.oauth2CredentialsToReset, request, collectionUid });
+      sendVariableUpdates(scriptResult, { collectionUid, requestUid, collection }, eventContext);
+      resetOauth2Credentials({ oauth2CredentialsToReset: scriptResult.oauth2CredentialsToReset, request, collectionUid }, eventContext);
 
       const domainsWithCookiesPost = await getDomainsWithCookies();
-      mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesPost)));
+      eventContext.emitLegacy('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesPost)));
     }
     return scriptResult;
   };
 
-  const runRequest = async ({ item, collection, envVars, processEnvVars, runtimeVariables, runInBackground = false, callerBru = null, parentExecutionMode = null, parentRunnerEventData = null, parentRequestUid = null }) => {
+  const runRequest = async ({ item, collection, envVars, processEnvVars, runtimeVariables, runInBackground = false, callerBru = null, parentExecutionMode = null, parentRunnerEventData = null, parentRequestUid = null, eventContext = rendererEventContext, signal, delayMs = 0, requestGuard = null }) => {
     const collectionUid = collection.uid;
     const collectionPath = collection.pathname;
     const cancelTokenUid = uuid();
@@ -788,7 +794,7 @@ const registerNetworkIpc = (mainWindow) => {
           const startedAt = Date.now();
           let res, err;
           try {
-            res = await runRequest({ item: _item, collection, envVars, processEnvVars, runtimeVariables, runInBackground: true, callerBru, parentExecutionMode, parentRunnerEventData, parentRequestUid: requestUid });
+            res = await runRequest({ item: _item, collection, envVars, processEnvVars, runtimeVariables, runInBackground: true, callerBru, parentExecutionMode, parentRunnerEventData, parentRequestUid: requestUid, eventContext, signal, requestGuard });
           } catch (e) {
             err = e;
           }
@@ -841,7 +847,7 @@ const registerNetworkIpc = (mainWindow) => {
         return;
       }
       entries.forEach((entry) => {
-        mainWindow.webContents.send('main:run-request-event', {
+        eventContext.emitLegacy('main:run-request-event', {
           type: 'scripted-request',
           collectionUid,
           itemUid: item.uid,
@@ -855,7 +861,7 @@ const registerNetworkIpc = (mainWindow) => {
       });
     };
 
-    !runInBackground && mainWindow.webContents.send('main:run-request-event', {
+    !runInBackground && eventContext.emitLegacy('main:run-request-event', {
       type: 'request-queued',
       requestUid,
       collectionUid,
@@ -864,14 +870,22 @@ const registerNetworkIpc = (mainWindow) => {
     });
 
     const abortController = new AbortController();
-    const request = await prepareRequest(item, collection, abortController);
+    const unlinkExternalAbort = linkAbortSignal(signal, abortController);
+    let request;
+    try {
+      request = await prepareRequest(item, collection, abortController);
+    } catch (error) {
+      unlinkExternalAbort();
+      throw error;
+    }
 
     // Every good boy deserves a response.
     if (request.method && request.method.toUpperCase() === 'WOOF') {
+      unlinkExternalAbort();
       return easterEggResponse(request);
     }
 
-    request.__bruno__executionMode = 'standalone';
+    request.__bruno__executionMode = parentExecutionMode === 'runner' ? 'runner' : 'standalone';
     request.responseType = 'stream';
     // flag to see if the stream needs to be handled as an actual stream or
     // is it just a data stream from axios
@@ -912,7 +926,8 @@ const registerNetworkIpc = (mainWindow) => {
           runtimeVariables,
           processEnvVars,
           scriptingConfig,
-          runRequestByItemPathname
+          runRequestByItemPathname,
+          eventContext
         );
       } catch (error) {
         preRequestError = error;
@@ -922,7 +937,7 @@ const registerNetworkIpc = (mainWindow) => {
         preRequestScriptResult = preRequestError.partialResults;
         // Forward any variable mutations the script made before throwing so the UI
         // and disk stay in sync with the partial test results we're about to render.
-        sendVariableUpdates(preRequestScriptResult, { collectionUid, requestUid, collection });
+        sendVariableUpdates(preRequestScriptResult, { collectionUid, requestUid, collection }, eventContext);
       }
 
       emitScriptedRequestEvents('pre-request', preRequestScriptResult);
@@ -930,7 +945,7 @@ const registerNetworkIpc = (mainWindow) => {
       preRequestScriptResult = appendScriptErrorResult('pre-request', preRequestScriptResult, preRequestError);
 
       if (preRequestScriptResult?.results) {
-        mainWindow.webContents.send('main:run-request-event', {
+        eventContext.emitLegacy('main:run-request-event', {
           type: 'test-results-pre-request',
           results: preRequestScriptResult.results,
           itemUid: item.uid,
@@ -945,12 +960,32 @@ const registerNetworkIpc = (mainWindow) => {
         scriptType: 'pre-request',
         error: preRequestError,
         collectionPath,
-        scriptMetadata: request.script?.reqMetadata
+        scriptMetadata: request.script?.reqMetadata,
+        eventContext
+      });
+
+      eventContext.recordControl({
+        nextRequestName: preRequestScriptResult?.nextRequestName,
+        stopExecution: preRequestScriptResult?.stopExecution,
+        skipRequest: preRequestScriptResult?.skipRequest
       });
 
       if (preRequestError) {
         return Promise.reject(preRequestError);
       }
+
+      if (preRequestScriptResult?.skipRequest) {
+        return {
+          status: 'skipped',
+          statusText: 'request skipped via pre-request script',
+          headers: {},
+          data: null,
+          dataBuffer: '',
+          size: 0,
+          duration: 0
+        };
+      }
+
       const axiosInstance = await configureRequest(
         collectionUid,
         collection,
@@ -961,6 +996,15 @@ const registerNetworkIpc = (mainWindow) => {
         collectionPath,
         collection.globalEnvironmentVariables
       );
+
+      if (typeof requestGuard === 'function') {
+        await requestGuard({
+          url: request.url,
+          method: request.method,
+          itemUid: item.uid,
+          itemName: item.name
+        });
+      }
 
       const { data: requestData, dataBuffer: requestDataBuffer } = parseDataFromRequest(request);
 
@@ -981,7 +1025,7 @@ const registerNetworkIpc = (mainWindow) => {
         timestamp: Date.now()
       };
 
-      !runInBackground && mainWindow.webContents.send('main:run-request-event', {
+      !runInBackground && eventContext.emitLegacy('main:run-request-event', {
         type: 'request-sent',
         requestSent,
         collectionUid,
@@ -991,7 +1035,7 @@ const registerNetworkIpc = (mainWindow) => {
       });
 
       if (request.oauth2Credentials?.credentials && request.oauth2Credentials?.credentialsId) {
-        mainWindow.webContents.send('main:credentials-update', {
+        eventContext.emitLegacy('main:credentials-update', {
           credentials: request?.oauth2Credentials?.credentials,
           url: request?.oauth2Credentials?.url,
           collectionUid,
@@ -1004,7 +1048,7 @@ const registerNetworkIpc = (mainWindow) => {
         });
 
         if (parentExecutionMode === 'runner' && parentRunnerEventData && request.oauth2Credentials.debugInfo) {
-          mainWindow.webContents.send('main:run-folder-event', {
+          eventContext.emitLegacy('main:run-folder-event', {
             type: 'oauth2-debug',
             ...parentRunnerEventData,
             url: request.oauth2Credentials.url,
@@ -1018,11 +1062,22 @@ const registerNetworkIpc = (mainWindow) => {
         Object.entries(credentials).forEach(([key, value]) => {
           request.oauth2CredentialVariables[`$oauth2.${credentialsId}.${key}`] = value;
         });
+
+        if (parentExecutionMode === 'runner') {
+          collection.oauth2Credentials = updateCollectionOauth2Credentials({
+            itemUid: item.uid,
+            collectionUid,
+            collectionOauth2Credentials: collection.oauth2Credentials,
+            requestOauth2Credentials: request.oauth2Credentials
+          });
+        }
       }
 
-      let response, responseTime, axiosDataStream;
+      let response, responseTime, responseError, axiosDataStream;
       const sseChunks = [];
       try {
+        await delayWithSignal(delayMs, abortController.signal);
+
         /** @type {import('axios').AxiosResponse} */
         response = await axiosInstance(request);
         isResponseStream = hasStreamHeaders(response.headers);
@@ -1038,7 +1093,7 @@ const registerNetworkIpc = (mainWindow) => {
         deleteCancelToken(cancelTokenUid);
 
         // if it's a cancel request, don't continue
-        if (axios.isCancel(error)) {
+        if (axios.isCancel(error) || abortController.signal.aborted) {
           // we are not rejecting the promise here and instead returning a response object with `error` which is handled in the `send-http-request` invocation
           // timeline prop won't be accessible in the usual way in the renderer process if we reject the promise
           return {
@@ -1050,6 +1105,7 @@ const registerNetworkIpc = (mainWindow) => {
         }
         if (error?.response) {
           response = error.response;
+          responseError = error.message;
 
           // Prevents the duration on leaking to the actual result
           responseTime = response.headers.get('request-duration');
@@ -1093,7 +1149,7 @@ const registerNetworkIpc = (mainWindow) => {
       // send domain cookies to renderer
       const domainsWithCookies = await getDomainsWithCookies();
 
-      mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookies)));
+      eventContext.emitLegacy('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookies)));
       cookiesStore.saveCookieJar();
 
       const runPostScripts = async () => {
@@ -1110,7 +1166,8 @@ const registerNetworkIpc = (mainWindow) => {
             runtimeVariables,
             processEnvVars,
             scriptingConfig,
-            runRequestByItemPathname);
+            runRequestByItemPathname,
+            eventContext);
         } catch (error) {
           console.error('Post-response script error:', error);
           postResponseError = error;
@@ -1122,7 +1179,7 @@ const registerNetworkIpc = (mainWindow) => {
         if (postResponseError?.partialResults) {
           postResponseScriptResult = postResponseError.partialResults;
           // Forward any variable mutations the script made before throwing.
-          sendVariableUpdates(postResponseScriptResult, { collectionUid, requestUid, collection });
+          sendVariableUpdates(postResponseScriptResult, { collectionUid, requestUid, collection }, eventContext);
         }
 
         emitScriptedRequestEvents('post-response', postResponseScriptResult);
@@ -1130,7 +1187,7 @@ const registerNetworkIpc = (mainWindow) => {
         postResponseScriptResult = appendScriptErrorResult('post-response', postResponseScriptResult, postResponseError);
 
         if (postResponseScriptResult?.results) {
-          mainWindow.webContents.send('main:run-request-event', {
+          eventContext.emitLegacy('main:run-request-event', {
             type: 'test-results-post-response',
             results: postResponseScriptResult.results,
             itemUid: item.uid,
@@ -1146,7 +1203,13 @@ const registerNetworkIpc = (mainWindow) => {
           error: postResponseError,
           itemPathname: item.pathname,
           collectionPath,
-          scriptMetadata: request.script?.resMetadata
+          scriptMetadata: request.script?.resMetadata,
+          eventContext
+        });
+
+        eventContext.recordControl({
+          nextRequestName: postResponseScriptResult?.nextRequestName,
+          stopExecution: postResponseScriptResult?.stopExecution
         });
 
         // run assertions
@@ -1160,7 +1223,7 @@ const registerNetworkIpc = (mainWindow) => {
             runtimeVariables,
             processEnvVars);
 
-          !runInBackground && mainWindow.webContents.send('main:run-request-event', {
+          !runInBackground && eventContext.emitLegacy('main:run-request-event', {
             type: 'assertion-results',
             results: results,
             itemUid: item.uid,
@@ -1183,7 +1246,7 @@ const registerNetworkIpc = (mainWindow) => {
               envVars,
               runtimeVariables,
               collectionPath,
-              onConsoleLog,
+              eventContext.onConsoleLog,
               processEnvVars,
               scriptingConfig,
               runRequestByItemPathname,
@@ -1209,7 +1272,7 @@ const registerNetworkIpc = (mainWindow) => {
 
           testResults = appendScriptErrorResult('test', testResults, testError);
 
-          !runInBackground && mainWindow.webContents.send('main:run-request-event', {
+          !runInBackground && eventContext.emitLegacy('main:run-request-event', {
             type: 'test-results',
             results: testResults.results,
             itemUid: item.uid,
@@ -1217,8 +1280,8 @@ const registerNetworkIpc = (mainWindow) => {
             collectionUid
           });
 
-          sendVariableUpdates(testResults, { collectionUid, requestUid, collection });
-          resetOauth2Credentials({ oauth2CredentialsToReset: testResults.oauth2CredentialsToReset, request, collectionUid });
+          sendVariableUpdates(testResults, { collectionUid, requestUid, collection }, eventContext);
+          resetOauth2Credentials({ oauth2CredentialsToReset: testResults.oauth2CredentialsToReset, request, collectionUid }, eventContext);
 
           !runInBackground && notifyScriptExecution({
             channel: 'main:run-request-event',
@@ -1227,11 +1290,14 @@ const registerNetworkIpc = (mainWindow) => {
             error: testError,
             itemPathname: item.pathname,
             collectionPath,
-            scriptMetadata: request.testsMetadata
+            scriptMetadata: request.testsMetadata,
+            eventContext
           });
 
+          eventContext.recordControl({ nextRequestName: testResults?.nextRequestName });
+
           const domainsWithCookiesTest = await getDomainsWithCookies();
-          mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesTest)));
+          eventContext.emitLegacy('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesTest)));
           cookiesStore.saveCookieJar();
         }
       };
@@ -1256,6 +1322,13 @@ const registerNetworkIpc = (mainWindow) => {
         await runPostScripts();
       }
 
+      if (isResponseStream) {
+        attachDeferredStreamCleanup(axiosDataStream, () => {
+          unlinkExternalAbort();
+          deleteCancelToken(cancelTokenUid);
+        });
+      }
+
       return {
         status: response.status,
         statusText: response.statusText,
@@ -1269,10 +1342,21 @@ const registerNetworkIpc = (mainWindow) => {
         duration: responseTime ?? 0,
         url: response.request ? response.request.protocol + '//' + response.request.host + response.request.path : null,
         timeline: response.timeline,
+        responseError,
         requestSent
       };
     } catch (error) {
       deleteCancelToken(cancelTokenUid);
+
+      if (abortController.signal.aborted) {
+        return {
+          statusText: 'REQUEST_CANCELLED',
+          isCancel: true,
+          error: 'REQUEST_CANCELLED',
+          timeline: error?.timeline,
+          requestSent
+        };
+      }
 
       // we are not rejecting the promise here and instead returning a response object with `error` which is handled in the `send-http-request` invocation
       // timeline prop won't be accessible in the usual way in the renderer process if we reject the promise
@@ -1282,6 +1366,11 @@ const registerNetworkIpc = (mainWindow) => {
         timeline: error?.timeline,
         requestSent
       };
+    } finally {
+      if (!isResponseStream) {
+        unlinkExternalAbort();
+        deleteCancelToken(cancelTokenUid);
+      }
     }
   };
 
@@ -1329,13 +1418,61 @@ const registerNetworkIpc = (mainWindow) => {
     return Array.from(new Set(prompts));
   };
 
-  // handler for sending http request
+  const httpGraphqlAdapter = createHttpGraphqlAdapter({
+    executeLifecycle: async ({
+      item,
+      collection,
+      environmentContext,
+      runtimeVariables,
+      executionContext,
+      eventContext,
+      signal
+    }) => {
+      const collectionUid = collection.uid;
+      const envVars = getEnvVars(environmentContext);
+      const processEnvVars = getProcessEnvVars(collectionUid);
+
+      return runRequest({
+        item,
+        collection,
+        envVars,
+        processEnvVars,
+        runtimeVariables,
+        runInBackground: executionContext?.runInBackground ?? false,
+        parentExecutionMode: executionContext?.parentExecutionMode,
+        parentRunnerEventData: executionContext?.parentRunnerEventData,
+        eventContext,
+        signal,
+        delayMs: executionContext?.delayMs ?? 0,
+        requestGuard: executionContext?.requestGuard
+      });
+    }
+  });
+
+  const requestExecutionService = createRequestExecutionService({
+    adapters: {
+      http: httpGraphqlAdapter,
+      graphql: httpGraphqlAdapter
+    },
+    createEventContext: ({ emitEvent, metadata }) => createExecutionEventContext({
+      emitEvent,
+      metadata,
+      forwardLegacyEvent: metadata.source === 'renderer' ? forwardRendererEvent : () => {}
+    })
+  });
+
+  // Legacy renderer adapter. Flow runtime and MCP will call the same service directly.
   ipcMain.handle('send-http-request', async (event, item, collection, environment, runtimeVariables) => {
     let seq = 0;
     const collectionUid = collection.uid;
-    const envVars = getEnvVars(environment);
-    const processEnvVars = getProcessEnvVars(collectionUid);
-    const response = await runRequest({ item, collection, envVars, processEnvVars, runtimeVariables, runInBackground: false });
+    const response = await requestExecutionService.executeLegacy({
+      workspaceContext: { pathname: collection.pathname },
+      collection,
+      item,
+      environmentContext: environment,
+      runtimeVariables,
+      executionContext: { source: 'renderer', runInBackground: false }
+    });
     if (response.stream) {
       const stream = response.stream;
       response.stream = { running: response.status >= 200 && response.status < 300 };
@@ -1406,125 +1543,12 @@ const registerNetworkIpc = (mainWindow) => {
       const collectionPath = collection.pathname;
       const folderUid = folder ? folder.uid : null;
       const cancelTokenUid = uuid();
-      const brunoConfig = getBrunoConfig(collectionUid, collection);
-      const scriptingConfig = get(brunoConfig, 'scripts', {});
-      scriptingConfig.runtime = getJsSandboxRuntime(collection);
       const envVars = getEnvVars(environment);
       const processEnvVars = getProcessEnvVars(collectionUid);
       let stopRunnerExecution = false;
-      let currentAbortController;
-      // Tracks the outer runner item currently executing so a nested bru.runRequest
-      // can route its oauth2 timeline entry back to this item.
-      let currentRunnerEventData = null;
 
       const abortController = new AbortController();
       saveCancelToken(cancelTokenUid, abortController);
-
-      abortController.signal.addEventListener('abort', () => {
-        if (currentAbortController) {
-          currentAbortController.abort();
-        }
-      });
-
-      const runRequestByItemPathname = async (relativeItemPathname, callerBru) => {
-        return new Promise(async (resolve, reject) => {
-          const format = getCollectionFormat(collection.pathname);
-          let itemPathname = path.join(collection.pathname, relativeItemPathname);
-          if (itemPathname && !hasRequestExtension(itemPathname, format)) {
-            itemPathname = `${itemPathname}.${format}`;
-          }
-          const _item = cloneDeep(findItemInCollectionByPathname(collection, itemPathname));
-          if (_item) {
-            // WS/gRPC items live on separate IPC channels and can't be driven via
-            // the HTTP runRequest. Record a Skipped row so the user sees feedback.
-            if (_item.type === 'ws-request' || _item.type === 'grpc-request') {
-              const protocolLabel = _item.type === 'ws-request' ? 'WebSocket' : 'gRPC';
-              const startedAt = Date.now();
-              callerBru?._recordScriptedRequest?.({
-                source: 'runRequest',
-                request: {
-                  method: (_item.request?.method || 'GET').toString().toUpperCase(),
-                  url: _item.request?.url,
-                  headers: {},
-                  data: null
-                },
-                response: {
-                  statusCode: null,
-                  statusText: 'Skipped',
-                  headers: {},
-                  data: null,
-                  dataBuffer: '',
-                  size: 0,
-                  duration: 0
-                },
-                error: null,
-                startedAt,
-                completedAt: startedAt
-              });
-              resolve({
-                status: 'skipped',
-                statusText: `bru.runRequest does not support ${protocolLabel} requests`,
-                headers: {},
-                data: null,
-                duration: 0,
-                size: 0
-              });
-              return;
-            }
-
-            const startedAt = Date.now();
-            let res, err;
-            try {
-              res = await runRequest({
-                item: _item,
-                collection,
-                envVars,
-                processEnvVars,
-                runtimeVariables,
-                runInBackground: true,
-                parentExecutionMode: 'runner',
-                parentRunnerEventData: currentRunnerEventData
-              });
-            } catch (e) {
-              err = e;
-            }
-            const completedAt = Date.now();
-            const sent = res?.requestSent || {};
-            callerBru?._recordScriptedRequest?.({
-              source: 'runRequest',
-              ...buildScriptedEntry({
-                request: {
-                  method: sent.method,
-                  url: sent.url || res?.url,
-                  headers: sent.headers,
-                  data: sent.data
-                },
-                response: res
-                  ? {
-                      status: res.status,
-                      statusText: res.statusText,
-                      headers: res.headers,
-                      data: res.data,
-                      dataBuffer: res.dataBuffer,
-                      size: res.size,
-                      duration: res.duration
-                    }
-                  : null,
-                error: err || (res?.error ? { message: res.error } : null),
-                startedAt,
-                completedAt
-              })
-            });
-            if (err) {
-              reject(err);
-              return;
-            }
-            resolve(res);
-            return;
-          }
-          reject(`bru.runRequest: invalid request path - ${itemPathname}`);
-        });
-      };
 
       if (!folder) {
         folder = collection;
@@ -1602,27 +1626,8 @@ const registerNetworkIpc = (mainWindow) => {
             folderUid,
             itemUid
           };
-          currentRunnerEventData = eventData;
-
-          const emitRunnerScriptedRequestEvents = (phase, scriptResult) => {
-            const entries = scriptResult?.scriptedRequestEntries || [];
-            entries.forEach((entry) => {
-              mainWindow.webContents.send('main:run-folder-event', {
-                type: 'scripted-request',
-                ...eventData,
-                phase,
-                source: entry.source,
-                scope: entry.scope || null,
-                timestamp: entry.startedAt,
-                data: { request: entry.request, response: entry.response, error: entry.error }
-              });
-            });
-          };
-
-          let timeStart;
-          let timeEnd;
-
           const requestUid = uuid();
+          item.requestUid = requestUid;
 
           mainWindow.webContents.send('main:run-folder-event', {
             type: 'request-queued',
@@ -1673,426 +1678,98 @@ const registerNetworkIpc = (mainWindow) => {
           }
 
           try {
-            // Build certsAndProxyConfig for bru.sendRequest
-            const certsAndProxyConfig = await buildCertsAndProxyConfig({
-              collectionUid,
-              collection,
-              collectionPath,
-              envVars,
-              runtimeVariables,
-              processEnvVars,
-              request
-            });
-
-            // Add certsAndProxyConfig to request object for bru.sendRequest
-            request.certsAndProxyConfig = certsAndProxyConfig;
-
-            let preRequestScriptResult;
-            let preRequestError = null;
-            try {
-              preRequestScriptResult = await runPreRequest(
-                request,
-                requestUid,
-                envVars,
-                collectionPath,
-                collection,
+            const runnerEventContext = createRunnerExecutionEventContext({
+              eventData,
+              forwardLegacyEvent: forwardRendererEvent,
+              metadata: {
+                source: 'runner',
                 collectionUid,
-                runtimeVariables,
-                processEnvVars,
-                scriptingConfig,
-                runRequestByItemPathname
-              );
-            } catch (error) {
-              console.error('Pre-request script error:', error);
-              preRequestError = error;
-            }
-
-            if (preRequestError?.partialResults) {
-              preRequestScriptResult = preRequestError.partialResults;
-              sendVariableUpdates(preRequestScriptResult, { collectionUid, requestUid, collection });
-            }
-
-            preRequestScriptResult = appendScriptErrorResult('pre-request', preRequestScriptResult, preRequestError);
-            emitRunnerScriptedRequestEvents('pre-request', preRequestScriptResult);
-
-            if (preRequestScriptResult?.results) {
-              mainWindow.webContents.send('main:run-folder-event', {
-                type: 'test-results-pre-request',
-                preRequestTestResults: preRequestScriptResult.results,
-                ...eventData
-              });
-            }
-
-            notifyScriptExecution({
-              channel: 'main:run-folder-event',
-              basePayload: eventData,
-              scriptType: 'pre-request',
-              error: preRequestError,
-              itemPathname: item.pathname,
-              collectionPath,
-              scriptMetadata: request.script?.reqMetadata
+                itemUid,
+                requestUid
+              }
             });
 
-            const domainsWithCookiesPreRequest = await getDomainsWithCookies();
-            mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesPreRequest)));
+            const { result: execution, legacyResult } = await requestExecutionService.executeWithLegacy({
+              workspaceContext: { pathname: collection.pathname },
+              collection,
+              item,
+              environmentContext: environment,
+              runtimeVariables,
+              signal: abortController.signal,
+              executionContext: {
+                source: 'runner',
+                runInBackground: false,
+                parentExecutionMode: 'runner',
+                parentRunnerEventData: eventData,
+                delayMs: delay,
+                eventContext: runnerEventContext
+              }
+            });
 
-            if (preRequestError) {
-              throw preRequestError;
+            nextRequestName = execution.control.nextRequestName;
+            stopRunnerExecution = Boolean(execution.control.stopExecution);
+
+            if (execution.status === 'cancelled') {
+              const cancellationError = new Error('Runner execution cancelled');
+              cancellationError.isCancel = true;
+              throw cancellationError;
             }
 
-            if (preRequestScriptResult?.nextRequestName !== undefined) {
-              nextRequestName = preRequestScriptResult.nextRequestName;
-            }
-
-            if (preRequestScriptResult?.stopExecution) {
-              stopRunnerExecution = true;
-            }
-
-            if (preRequestScriptResult?.skipRequest) {
+            if (execution.status === 'skipped') {
               mainWindow.webContents.send('main:run-folder-event', {
                 type: 'runner-request-skipped',
-                error: 'Request has been skipped from pre-request script',
+                error: legacyResult?.statusText || 'Request skipped',
                 responseReceived: {
                   status: 'skipped',
-                  statusText: 'request skipped via pre-request script',
+                  statusText: legacyResult?.statusText || 'Request skipped',
                   data: null,
                   responseTime: 0,
                   headers: null
                 },
                 ...eventData
               });
-              currentRequestIndex++;
-              continue;
-            }
-
-            const { data: requestData, dataBuffer: requestDataBuffer } = parseDataFromRequest(request);
-
-            // Remove false Content-Type header (used to stop axios from auto-setting it); no Content-Type was actually set or sent.
-            const headersSent = { ...request.headers };
-            Object.keys(headersSent).forEach((key) => {
-              if (key.toLowerCase() === 'content-type' && headersSent[key] === false) {
-                delete headersSent[key];
-              }
-            });
-
-            let requestSent = {
-              url: request.url,
-              method: request.method,
-              headers: headersSent,
-              data: requestData,
-              dataBuffer: requestDataBuffer,
-              timestamp: Date.now()
-            };
-
-            // todo:
-            // i have no clue why electron can't send the request object
-            // without safeParseJSON(safeStringifyJSON(request.data))
-            mainWindow.webContents.send('main:run-folder-event', {
-              type: 'request-sent',
-              requestSent,
-              ...eventData
-            });
-
-            currentAbortController = new AbortController();
-            request.signal = currentAbortController.signal;
-            request.responseType = 'stream';
-            const axiosInstance = await configureRequest(
-              collectionUid,
-              collection,
-              request,
-              envVars,
-              runtimeVariables,
-              processEnvVars,
-              collectionPath,
-              collection.globalEnvironmentVariables
-            );
-
-            if (request.oauth2Credentials?.credentials && request.oauth2Credentials?.credentialsId) {
-              mainWindow.webContents.send('main:credentials-update', {
-                credentials: request?.oauth2Credentials?.credentials,
-                url: request?.oauth2Credentials?.url,
-                collectionUid,
-                credentialsId: request?.oauth2Credentials?.credentialsId,
-                ...(request?.oauth2Credentials?.folderUid ? { folderUid: request.oauth2Credentials.folderUid } : { itemUid: item.uid }),
-                debugInfo: request?.oauth2Credentials?.debugInfo,
-                // Reducer updates the cache but skips the timeline push for 'runner'.
-                executionMode: 'runner'
+            } else if (execution.status === 'failed') {
+              mainWindow.webContents.send('main:run-folder-event', {
+                type: 'error',
+                error: execution.error?.message || 'An error occurred while running the request',
+                responseReceived: legacyResult?.status ? {
+                  status: legacyResult.status,
+                  statusText: legacyResult.statusText,
+                  headers: legacyResult.headers,
+                  duration: legacyResult.duration ?? execution.durationMs,
+                  dataBuffer: legacyResult.dataBuffer,
+                  size: legacyResult.size,
+                  data: legacyResult.data,
+                  responseTime: legacyResult.duration,
+                  timeline: legacyResult.timeline,
+                  url: legacyResult.url
+                } : {},
+                ...eventData
               });
-
-              // RunnerTimeline reads oauth from the runner item, not collection.timeline.
-              if (request.oauth2Credentials.debugInfo) {
-                mainWindow.webContents.send('main:run-folder-event', {
-                  type: 'oauth2-debug',
-                  ...eventData,
-                  url: request.oauth2Credentials.url,
-                  credentialsId: request.oauth2Credentials.credentialsId,
-                  debugInfo: request.oauth2Credentials.debugInfo
-                });
-              }
-
-              const { credentialsId, credentials } = request.oauth2Credentials;
-              request.oauth2CredentialVariables = request.oauth2CredentialVariables || {};
-              Object.entries(credentials).forEach(([key, value]) => {
-                request.oauth2CredentialVariables[`$oauth2.${credentialsId}.${key}`] = value;
-              });
-
-              collection.oauth2Credentials = updateCollectionOauth2Credentials({
-                itemUid: item.uid,
-                collectionUid,
-                collectionOauth2Credentials: collection.oauth2Credentials,
-                requestOauth2Credentials: request.oauth2Credentials
-              });
-            }
-
-            timeStart = Date.now();
-            let response, responseTime;
-            try {
-              if (delay && !Number.isNaN(delay) && delay > 0) {
-                const delayPromise = new Promise((resolve) => setTimeout(resolve, delay));
-
-                const cancellationPromise = new Promise((_, reject) => {
-                  abortController.signal.addEventListener('abort', () => {
-                    reject(new Error('Cancelled'));
-                  });
-                });
-
-                await Promise.race([delayPromise, cancellationPromise]);
-              }
-
-              /** @type {import('axios').AxiosResponse} */
-              response = await axiosInstance(request);
-              response.data = await promisifyStream(response.data, currentAbortController, false);
-              timeEnd = Date.now();
-
-              const { data, dataBuffer } = parseDataFromResponse(response, request.__brunoDisableParsingResponseJson);
-              response.data = data;
-              response.dataBuffer = dataBuffer;
-              response.responseTime = response.headers.get('request-duration');
-              response.headers.delete('request-duration');
-
-              // save cookies
-              if (preferencesUtil.shouldStoreCookies()) {
-                saveCookies(request.url, response.headers);
-              }
-
-              // send domain cookies to renderer
-              const domainsWithCookies = await getDomainsWithCookies();
-
-              mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookies)));
-
+            } else {
               mainWindow.webContents.send('main:run-folder-event', {
                 type: 'response-received',
+                ...(legacyResult?.responseError ? { error: legacyResult.responseError } : {}),
                 responseReceived: {
-                  status: response.status,
-                  statusText: response.statusText,
-                  headers: response.headers,
-                  duration: timeEnd - timeStart,
-                  dataBuffer: dataBuffer.toString('base64'),
-                  size: Buffer.byteLength(dataBuffer),
-                  data: response.data,
-                  responseTime: response.responseTime,
-                  timeline: response.timeline,
-                  url: response.request ? response.request.protocol + '//' + response.request.host + response.request.path : null
+                  status: legacyResult.status,
+                  statusText: legacyResult.statusText,
+                  headers: legacyResult.headers,
+                  duration: legacyResult.duration ?? execution.durationMs,
+                  dataBuffer: legacyResult.dataBuffer,
+                  size: legacyResult.size,
+                  data: legacyResult.data,
+                  responseTime: legacyResult.duration,
+                  timeline: legacyResult.timeline,
+                  url: legacyResult.url
                 },
                 ...eventData
               });
-            } catch (error) {
-              // Skip further processing if request was cancelled
-              if (axios.isCancel(error)) {
-                throw error;
-              }
-
-              if (error?.response) {
-                error.response.data = await promisifyStream(error.response.data, currentAbortController, false);
-                const { data, dataBuffer } = parseDataFromResponse(error.response);
-                error.response.responseTime = error.response.headers.get('request-duration');
-                error.response.headers.delete('request-duration');
-                error.response.data = data;
-                error.response.dataBuffer = dataBuffer;
-
-                // save cookies (4XX/5XX responses can also set cookies)
-                if (preferencesUtil.shouldStoreCookies()) {
-                  saveCookies(request.url, error.response.headers);
-                }
-
-                timeEnd = Date.now();
-                response = {
-                  status: error.response.status,
-                  statusText: error.response.statusText,
-                  headers: error.response.headers,
-                  duration: timeEnd - timeStart,
-                  dataBuffer: dataBuffer.toString('base64'),
-                  size: Buffer.byteLength(dataBuffer),
-                  data: error.response.data,
-                  responseTime: error.response.responseTime,
-                  timeline: error.response.timeline
-                };
-
-                // if we get a response from the server, we consider it as a success
-                mainWindow.webContents.send('main:run-folder-event', {
-                  type: 'response-received',
-                  error: error ? error.message : 'An error occurred while running the request',
-                  responseReceived: response,
-                  ...eventData
-                });
-              } else {
-                await executeRequestOnFailHandler(request, error);
-
-                // if it's not a network error, don't continue
-                throw error;
-              }
-            }
-
-            let postResponseScriptResult;
-            let postResponseError = null;
-            try {
-              postResponseScriptResult = await runPostResponse(
-                request,
-                response,
-                requestUid,
-                envVars,
-                collectionPath,
-                collection,
-                collectionUid,
-                runtimeVariables,
-                processEnvVars,
-                scriptingConfig,
-                runRequestByItemPathname
-              );
-            } catch (error) {
-              console.error('Post-response script error:', error);
-              postResponseError = error;
-            }
-
-            // Extract partial results from error if available
-            // (e.g., if 2 tests pass then script throws, we still want to show those 2 passing tests)
-            if (postResponseError?.partialResults) {
-              postResponseScriptResult = postResponseError.partialResults;
-              sendVariableUpdates(postResponseScriptResult, { collectionUid, requestUid, collection });
-            }
-
-            postResponseScriptResult = appendScriptErrorResult('post-response', postResponseScriptResult, postResponseError);
-            emitRunnerScriptedRequestEvents('post-response', postResponseScriptResult);
-
-            notifyScriptExecution({
-              channel: 'main:run-folder-event',
-              basePayload: eventData,
-              scriptType: 'post-response',
-              error: postResponseError,
-              itemPathname: item.pathname,
-              collectionPath,
-              scriptMetadata: request.script?.resMetadata
-            });
-
-            const domainsWithCookiesPostResponse = await getDomainsWithCookies();
-            mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesPostResponse)));
-
-            if (postResponseScriptResult?.nextRequestName !== undefined) {
-              nextRequestName = postResponseScriptResult.nextRequestName;
-            }
-
-            if (postResponseScriptResult?.stopExecution) {
-              stopRunnerExecution = true;
-            }
-
-            // Send post-response test results if available
-            if (postResponseScriptResult?.results) {
-              mainWindow.webContents.send('main:run-folder-event', {
-                type: 'test-results-post-response',
-                postResponseTestResults: postResponseScriptResult.results,
-                ...eventData
-              });
-            }
-
-            // run assertions
-            const assertions = get(item, 'request.assertions');
-            if (assertions) {
-              const assertRuntime = new AssertRuntime({ runtime: scriptingConfig?.runtime });
-              const results = assertRuntime.runAssertions(
-                assertions,
-                request,
-                response,
-                envVars,
-                runtimeVariables,
-                processEnvVars
-              );
-
-              mainWindow.webContents.send('main:run-folder-event', {
-                type: 'assertion-results',
-                assertionResults: results,
-                itemUid: item.uid,
-                collectionUid
-              });
-            }
-
-            const testFile = get(request, 'tests');
-            const collectionName = collection?.name;
-            if (typeof testFile === 'string') {
-              let testResults = null;
-              let testError = null;
-
-              try {
-                const testRuntime = new TestRuntime({ runtime: scriptingConfig?.runtime });
-                testResults = await testRuntime.runTests(
-                  decomment(testFile, { space: true }),
-                  request,
-                  response,
-                  envVars,
-                  runtimeVariables,
-                  collectionPath,
-                  onConsoleLog,
-                  processEnvVars,
-                  scriptingConfig,
-                  runRequestByItemPathname,
-                  collectionName
-                );
-              } catch (error) {
-                testError = error;
-
-                if (error.partialResults) {
-                  testResults = error.partialResults;
-                } else {
-                  testResults = {
-                    request,
-                    envVariables: envVars,
-                    runtimeVariables,
-                    globalEnvironmentVariables: request?.globalEnvironmentVariables || {},
-                    results: [],
-                    nextRequestName: null
-                  };
-                }
-              }
-
-              testResults = appendScriptErrorResult('test', testResults, testError);
-              emitRunnerScriptedRequestEvents('tests', testResults);
-
-              if (testResults?.nextRequestName !== undefined) {
-                nextRequestName = testResults.nextRequestName;
-              }
-
-              mainWindow.webContents.send('main:run-folder-event', {
-                type: 'test-results',
-                testResults: testResults.results,
-                ...eventData
-              });
-
-              sendVariableUpdates(testResults, { collectionUid, requestUid, collection });
-              resetOauth2Credentials({ oauth2CredentialsToReset: testResults.oauth2CredentialsToReset, request, collectionUid });
-
-              notifyScriptExecution({
-                channel: 'main:run-folder-event',
-                basePayload: eventData,
-                scriptType: 'test',
-                error: testError,
-                itemPathname: item.pathname,
-                collectionPath,
-                scriptMetadata: request.testsMetadata
-              });
-
-              const domainsWithCookiesTest = await getDomainsWithCookies();
-              mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesTest)));
             }
           } catch (error) {
+            if (abortController.signal.aborted || error?.isCancel) {
+              throw error;
+            }
+
             mainWindow.webContents.send('main:run-folder-event', {
               type: 'error',
               error: error ? error.message : 'An error occurred while running the request',
@@ -2219,6 +1896,8 @@ const registerNetworkIpc = (mainWindow) => {
       return Promise.reject(error);
     }
   });
+
+  return { requestExecutionService };
 };
 
 /**
@@ -2241,9 +1920,10 @@ const executeRequestOnFailHandler = async (request, error) => {
 };
 
 const registerAllNetworkIpc = (mainWindow) => {
-  registerNetworkIpc(mainWindow);
+  const services = registerNetworkIpc(mainWindow);
   registerGrpcEventHandlers(mainWindow);
   registerWsEventHandlers(mainWindow);
+  return services;
 };
 
 module.exports = registerAllNetworkIpc;

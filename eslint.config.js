@@ -20,6 +20,8 @@ module.exports = runESMImports().then(() => defineConfig([
       'packages/bruno-js/src/sandbox/bundle-browser-rollup.js',
       'packages/bruno-app/public/static/**/*',
       'packages/bruno-app/.next/**/*',
+      'packages/bruno-app/storybook-static/**/*',
+      'packages/bruno-electron/out/**/*',
       'packages/bruno-electron/web/**/*'
     ]
   },
@@ -43,6 +45,7 @@ module.exports = runESMImports().then(() => defineConfig([
       'packages/bruno-app/src/test-utils/mocks/codemirror.js',
       'packages/bruno-cli/**/*.js',
       'packages/bruno-common/**/*.ts',
+      'packages/bruno-flow-core/**/*.{ts,js}',
       'packages/bruno-converters/**/*.js',
       'packages/bruno-electron/**/*.js',
       'packages/bruno-filestore/**/*.ts',
@@ -158,6 +161,25 @@ module.exports = runESMImports().then(() => defineConfig([
         ecmaVersion: 'latest',
         sourceType: 'module',
         project: './packages/bruno-common/tsconfig.json'
+      }
+    },
+    rules: {
+      'no-undef': 'error'
+    }
+  },
+  {
+    files: ['packages/bruno-flow-core/**/*.ts'],
+    ignores: ['**/dist/**/*'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.jest
+      },
+      parser: require('@typescript-eslint/parser'),
+      parserOptions: {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        project: './packages/bruno-flow-core/tsconfig.json'
       }
     },
     rules: {

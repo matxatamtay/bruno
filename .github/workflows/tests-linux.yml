@@ -26,6 +26,7 @@ jobs:
       - name: Run Unit Tests
         uses: ./.github/actions/tests/run-unit-tests
 
+
   cli-test:
     name: CLI Tests (Linux)
     runs-on: ubuntu-latest

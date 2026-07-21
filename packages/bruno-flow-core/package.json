@@ -1,0 +1,57 @@
+{
+  "name": "@usebruno/flow-core",
+  "version": "0.1.0",
+  "license": "MIT",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/cjs/index.js",
+      "import": "./dist/esm/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./persistence": {
+      "require": "./dist/persistence/cjs/index.js",
+      "import": "./dist/persistence/esm/index.js",
+      "types": "./dist/persistence/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rimraf dist",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch",
+    "prebuild": "npm run clean",
+    "build": "rollup -c",
+    "watch": "rollup -c -w",
+    "prepack": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "chokidar": "^3.5.3",
+    "crypto-js": "^4.2.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^23.0.2",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^15.0.1",
+    "@rollup/plugin-terser": "^1.0.0",
+    "@rollup/plugin-typescript": "^12.1.2",
+    "@types/js-yaml": "^4.0.9",
+    "rollup": "3.30.0",
+    "rollup-plugin-dts": "^5.0.0",
+    "rollup-plugin-peer-deps-external": "^2.2.4",
+    "ts-jest": "^29.2.6",
+    "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "rollup": "3.30.0"
+  }
+}

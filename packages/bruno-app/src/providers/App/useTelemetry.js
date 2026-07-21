@@ -65,11 +65,11 @@ const trackStart = (version) => {
 
 const useTelemetry = ({ version }) => {
   useEffect(() => {
-    if (posthogApiKey && posthogApiKey.length) {
-      trackStart(version);
-      setInterval(trackStart, 24 * 60 * 60 * 1000);
-    }
-  }, [posthogApiKey]);
+    if (!posthogApiKey?.length) return undefined;
+    trackStart(version);
+    const interval = setInterval(() => trackStart(version), 24 * 60 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [version]);
 };
 
 export default useTelemetry;

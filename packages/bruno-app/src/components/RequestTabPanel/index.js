@@ -52,6 +52,8 @@ import GitReview from 'components/Git/GitReview';
 import WebRecorder from 'components/WebRecorder';
 import ReplayUsageBadge from './ReplayUsageBadge';
 
+const FlowStudioWorkspace = React.lazy(() => import('../../flow-studio/editor'));
+
 const MIN_LEFT_PANE_WIDTH = 300;
 const MIN_RIGHT_PANE_WIDTH = 490;
 const MIN_TOP_PANE_HEIGHT = 150;
@@ -441,6 +443,14 @@ const RequestTabPanel = () => {
 
   if (focusedTab.type === 'workspaceEnvironments') {
     return <GlobalEnvironmentSettings />;
+  }
+
+  if (focusedTab.type === 'workspaceFlowStudio') {
+    return activeWorkspace ? (
+      <React.Suspense fallback={<RequestTabPanelLoading />}>
+        <FlowStudioWorkspace workspace={activeWorkspace} />
+      </React.Suspense>
+    ) : null;
   }
 
   if (!focusedTab.uid || !focusedTab.collectionUid) {

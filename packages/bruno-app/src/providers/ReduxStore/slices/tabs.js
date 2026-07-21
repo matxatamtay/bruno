@@ -8,7 +8,7 @@ import { isActiveTab as checkIsActiveTab, deserializeTab } from 'utils/snapshot'
 
 const MAX_RECENTLY_CLOSED_TABS = 50;
 
-export const NON_CLOSABLE_TAB_TYPES = ['workspaceOverview', 'workspaceEnvironments'];
+export const NON_CLOSABLE_TAB_TYPES = ['workspaceOverview', 'workspaceEnvironments', 'workspaceFlowStudio'];
 
 const initialState = {
   tabs: [],
@@ -61,6 +61,7 @@ export const tabsSlice = createSlice({
         'preferences',
         'workspaceOverview',
         'workspaceEnvironments',
+        'workspaceFlowStudio',
         'openapi-sync',
         'openapi-spec',
         'git-review',

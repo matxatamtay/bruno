@@ -13,6 +13,7 @@ import apiSpecReducer from './slices/apiSpec';
 import openapiSyncReducer from './slices/openapi-sync';
 import chatReducer from './slices/chat';
 import recorderReducer from './slices/recorder';
+import flowCatalogReducer from './slices/flow-catalog';
 import { draftDetectMiddleware } from './middlewares/draft/middleware';
 import { autosaveMiddleware } from './middlewares/autosave/middleware';
 import { snapshotMiddleware } from './middlewares/snapshot/middleware';
@@ -39,7 +40,8 @@ export const store = configureStore({
     apiSpec: apiSpecReducer,
     openapiSync: openapiSyncReducer,
     chat: chatReducer,
-    recorder: recorderReducer
+    recorder: recorderReducer,
+    flowCatalog: flowCatalogReducer
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(middleware)
 });

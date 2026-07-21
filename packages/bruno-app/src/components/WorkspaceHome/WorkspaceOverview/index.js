@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
-import { IconPlus, IconFolder, IconDownload } from '@tabler/icons';
+import { IconPlus, IconFolder, IconDownload, IconGitBranch } from '@tabler/icons';
 import { importCollection, openCollection, importCollectionFromZip } from 'providers/ReduxStore/slices/collections/actions';
 import { setIsCreatingCollection, toggleSidebarCollapse } from 'providers/ReduxStore/slices/app';
+import { addTab } from 'providers/ReduxStore/slices/tabs';
 import toast from 'react-hot-toast';
 import ImportCollection from 'components/Sidebar/ImportCollection';
 import ImportCollectionLocation from 'components/Sidebar/ImportCollectionLocation';
@@ -63,6 +64,15 @@ const WorkspaceOverview = ({ workspace }) => {
 
   const handleImportCollection = () => {
     setImportCollectionModalOpen(true);
+  };
+
+  const handleOpenFlowStudio = () => {
+    if (!workspace?.scratchCollectionUid) return;
+    dispatch(addTab({
+      uid: `${workspace.scratchCollectionUid}-flows`,
+      collectionUid: workspace.scratchCollectionUid,
+      type: 'workspaceFlowStudio'
+    }));
   };
 
   const handleImportCollectionSubmit = ({ rawData, type, repositoryUrl, ...rest }) => {
@@ -179,6 +189,15 @@ const WorkspaceOverview = ({ workspace }) => {
                 onClick={handleImportCollection}
               >
                 Import Collection
+              </Button>
+              <Button
+                color="light"
+                size="sm"
+                icon={<IconGitBranch size={14} strokeWidth={1.5} />}
+                onClick={handleOpenFlowStudio}
+                disabled={!workspace?.scratchCollectionUid}
+              >
+                Flow Studio
               </Button>
             </div>
           </div>

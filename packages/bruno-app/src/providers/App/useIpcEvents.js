@@ -44,6 +44,8 @@ import { loadNotifications } from 'providers/ReduxStore/slices/notifications';
 import { updateSystemResources } from 'providers/ReduxStore/slices/performance';
 import { apiSpecAddFileEvent, apiSpecChangeFileEvent } from 'providers/ReduxStore/slices/apiSpec';
 import { recorderStateReceived, recorderEventReceived } from 'providers/ReduxStore/slices/recorder';
+import { openWorkspaceFlowCatalog } from 'providers/ReduxStore/slices/flow-catalog-actions';
+import { registerFlowCatalogIpcListeners } from 'providers/ReduxStore/slices/flow-catalog-events';
 import { findCollectionByUid, findItemInCollection } from 'utils/collections';
 
 export const recordRunnerObservation = ({ ipcRenderer, store, val }) => {
@@ -157,6 +159,7 @@ const useIpcEvents = () => {
 
     const removeOpenWorkspaceListener = ipcRenderer.on('main:workspace-opened', (workspacePath, workspaceUid, workspaceConfig) => {
       dispatch(workspaceOpenedEvent(workspacePath, workspaceUid, workspaceConfig));
+      dispatch(openWorkspaceFlowCatalog({ workspaceUid, workspacePath }));
     });
 
     const removeWorkspacesReadyListener = ipcRenderer.on('main:workspaces-ready', () => {
@@ -411,12 +414,15 @@ const useIpcEvents = () => {
       dispatch(recorderEventReceived(val));
     });
 
+    const removeFlowCatalogListeners = registerFlowCatalogIpcListeners({ ipcRenderer, dispatch });
+
     return () => {
       removeCollectionTreeLoadedListener();
       removeCollectionLoadingStateV2Listener();
       removeBrunoConfigUpdateV2Listener();
       removeRecorderStateListener();
       removeRecorderEventListener();
+      removeFlowCatalogListeners();
       removeCollectionTreeUpdateListener();
       removeApiSpecTreeUpdateListener();
       removeOpenCollectionListener();

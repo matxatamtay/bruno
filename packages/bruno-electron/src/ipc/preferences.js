@@ -10,7 +10,7 @@ const LastOpenedCollections = require('../store/last-opened-collections');
 const WindowStateStore = require('../store/window-state');
 const { clearAgentCache, clearPacCache } = require('@usebruno/requests');
 
-const registerPreferencesIpc = (mainWindow) => {
+const registerPreferencesIpc = (mainWindow, options = {}) => {
   const lastOpenedCollections = new LastOpenedCollections();
 
   const onboardingPromise = onboardUser(mainWindow, lastOpenedCollections);
@@ -54,6 +54,7 @@ const registerPreferencesIpc = (mainWindow) => {
   ipcMain.handle('renderer:save-preferences', async (event, preferences) => {
     try {
       await savePreferences(preferences);
+      await options.onPreferencesSaved?.(preferences);
     } catch (error) {
       return Promise.reject(error);
     }

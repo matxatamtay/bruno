@@ -176,6 +176,11 @@ function startDevelopment() {
       prefixColor: '#FA8072'
     },
     {
+      command: 'npm run watch --workspace=packages/bruno-flow-core',
+      name: 'flow-core',
+      prefixColor: '#DDA0DD'
+    },
+    {
       command: 'npm run dev:web',
       name: 'react',
       prefixColor: 'cyan'

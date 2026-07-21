@@ -1,4 +1,7 @@
-const { DatabaseSync } = require('node:sqlite');
+const openNodeSqliteDatabase = (pathname) => {
+  const { DatabaseSync } = require('node:sqlite');
+  return new DatabaseSync(pathname);
+};
 
 // Lazy SQLite connection. The db is opened on first use, pragmas are applied,
 // pending migrations are run (tracked via PRAGMA user_version), and prepared
@@ -9,13 +12,22 @@ class Database {
   #migrations;
   #pragmas;
   #readBigInts;
+  #driverFactory;
   #statements = new Map();
 
-  constructor({ path, migrations = [], pragmas, readBigInts = false }) {
+  constructor({
+    path,
+    migrations = [],
+    pragmas,
+    readBigInts = false,
+    driverFactory = openNodeSqliteDatabase
+  }) {
     this.#path = path;
     this.#migrations = migrations;
     this.#pragmas = pragmas;
     this.#readBigInts = readBigInts;
+    this.#driverFactory = driverFactory;
+
     this.#validateMigrations();
   }
 
@@ -38,7 +50,10 @@ class Database {
     let stmt = this.#statements.get(sql);
     if (!stmt) {
       stmt = db.prepare(sql);
-      if (this.#readBigInts) stmt.setReadBigInts(true);
+      if (this.#readBigInts) {
+        if (typeof stmt.setReadBigInts === 'function') stmt.setReadBigInts(true);
+        else if (typeof stmt.safeIntegers === 'function') stmt.safeIntegers(true);
+      }
       this.#statements.set(sql, stmt);
     }
     return stmt;
@@ -82,7 +97,7 @@ class Database {
 
   #connect() {
     if (this.#db) return this.#db;
-    const db = new DatabaseSync(this.path);
+    const db = this.#driverFactory(this.path);
     if (this.#pragmas) {
       for (const [key, value] of Object.entries(this.#pragmas)) {
         db.exec(`PRAGMA ${key} = ${value};`);
@@ -97,6 +112,13 @@ class Database {
     if (!this.#migrations.length) return;
     const sorted = [...this.#migrations].sort((a, b) => a.version - b.version);
     let current = db.prepare('PRAGMA user_version').get().user_version;
+    const latest = sorted[sorted.length - 1].version;
+    if (current > latest) {
+      const error = new Error(`Database schema version ${current} is newer than supported version ${latest}`);
+      error.code = 'DATABASE_SCHEMA_NEWER';
+      throw error;
+    }
+
     for (const migration of sorted) {
       if (migration.version <= current) continue;
       db.exec('BEGIN');
@@ -126,4 +148,4 @@ class Database {
   }
 }
 
-module.exports = { Database };
+module.exports = { Database, openNodeSqliteDatabase };

@@ -15,6 +15,7 @@
     "prebuild": "npm run clean",
     "build": "rollup -c",
     "watch": "rollup -c -w",
+    "pretest": "npm --prefix ../bruno-common run build",
     "test": "jest",
     "test:watch": "jest --watch",
     "prepack": "npm run test && npm run build"

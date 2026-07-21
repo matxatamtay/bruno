@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://usebruno.com/schemas/flow-studio/flow-v1.schema.json",
+  "title": "Bruno Flow Studio FlowDefinition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "uid", "name", "revision", "workspace", "defaults", "nodes", "controlEdges", "dataEdges", "frames", "metadata"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "uid": { "$ref": "#/$defs/uid" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 10000 },
+    "revision": { "type": "string", "pattern": "^(sha256:[a-f0-9]{64}|rev:[A-Za-z0-9._-]+)$" },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid"],
+      "properties": { "uid": { "$ref": "#/$defs/uid" } }
+    },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "inputSchema": { "type": "object" },
+    "outputSchema": { "type": "object" },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" }, "maxItems": 2000 },
+    "controlEdges": { "type": "array", "items": { "$ref": "#/$defs/controlEdge" }, "maxItems": 10000 },
+    "dataEdges": { "type": "array", "items": { "$ref": "#/$defs/dataEdge" }, "maxItems": 10000 },
+    "frames": { "type": "array", "items": { "$ref": "#/$defs/frame" }, "maxItems": 1000 },
+    "viewport": { "$ref": "#/$defs/viewport" },
+    "metadata": { "$ref": "#/$defs/metadata" }
+  },
+  "$defs": {
+    "uid": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$" },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+    },
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "retryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxAttempts"],
+      "properties": {
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "backoffMs": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "strategy": { "enum": ["fixed", "linear", "exponential"] }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "workspaceEnvironmentUid": { "$ref": "#/$defs/uid" },
+            "collectionEnvironmentUid": { "$ref": "#/$defs/uid" }
+          }
+        },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "retry": { "$ref": "#/$defs/retryPolicy" },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "failureMode": { "enum": ["fail-fast", "collect-errors", "best-effort"] },
+        "datasetLimit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "subflowDepth": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "requestReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collectionPath", "itemPathname"],
+      "properties": {
+        "collectionPath": { "type": "string", "minLength": 1 },
+        "itemPathname": { "type": "string", "minLength": 1 },
+        "expectedItemUid": { "$ref": "#/$defs/uid" },
+        "expectedMethod": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "fingerprint": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "semanticKey", "kind", "position", "config"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uid" },
+        "semanticKey": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "name": { "type": "string", "maxLength": 200 },
+        "kind": {
+          "enum": [
+            "start", "end", "condition", "fork", "join", "delay", "subflow", "checkpoint", "fail",
+            "http", "graphql", "websocket", "grpc-unary", "sse",
+            "static-input", "form-input", "environment-input", "dataset-input", "response-extractor",
+            "transform", "generator", "secret-reference", "merge", "set-variables"
+          ]
+        },
+        "position": { "$ref": "#/$defs/position" },
+        "size": { "$ref": "#/$defs/size" },
+        "frameId": { "$ref": "#/$defs/uid" },
+        "requestRef": { "$ref": "#/$defs/requestReference" },
+        "config": { "type": "object" },
+        "policy": { "$ref": "#/$defs/nodePolicy" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["http", "graphql", "websocket", "grpc-unary", "sse"] } } },
+          "then": {
+            "required": ["requestRef"],
+            "properties": { "requestRef": { "$ref": "#/$defs/requestReference" } }
+          }
+        }
+      ]
+    },
+    "nodePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retry": { "$ref": "#/$defs/retryPolicy" },
+        "sideEffect": { "enum": ["none", "read-only", "idempotent", "once"] },
+        "resume": { "enum": ["reuse", "rerun", "forbid"] },
+        "allowReplay": { "type": "boolean" },
+        "allowRetry": { "type": "boolean" }
+      }
+    },
+    "controlEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sourceNodeId", "targetNodeId"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uid" },
+        "sourceNodeId": { "$ref": "#/$defs/uid" },
+        "sourcePort": { "type": "string", "maxLength": 128 },
+        "targetNodeId": { "$ref": "#/$defs/uid" },
+        "targetPort": { "type": "string", "maxLength": 128 },
+        "condition": { "type": "string", "maxLength": 10000 },
+        "label": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "dataEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "path"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/uid" },
+        "path": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "dataEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "target"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uid" },
+        "source": { "$ref": "#/$defs/dataEndpoint" },
+        "target": { "$ref": "#/$defs/dataEndpoint" },
+        "transform": { "type": "string", "maxLength": 10000 },
+        "required": { "type": "boolean", "default": true }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "position", "size"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "position": { "$ref": "#/$defs/position" },
+        "size": { "$ref": "#/$defs/size" },
+        "parentFrameId": { "$ref": "#/$defs/uid" },
+        "policy": { "type": "object" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "zoom"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "zoom": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["createdAt", "updatedAt"],
+      "properties": {
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "tags": { "type": "array", "items": { "type": "string", "maxLength": 100 }, "uniqueItems": true },
+        "requires": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bruno": { "type": "string" },
+            "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+          }
+        }
+      }
+    }
+  }
+}

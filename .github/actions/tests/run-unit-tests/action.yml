@@ -40,6 +40,10 @@ runs:
       shell: ${{ inputs.shell }}
       run: npm run test:ci --workspace=packages/bruno-converters
 
+    - name: Test Package bruno-flow-core
+      shell: ${{ inputs.shell }}
+      run: npm run test --workspace=packages/bruno-flow-core
+
     - name: Test Package bruno-electron
       shell: ${{ inputs.shell }}
       run: npm run test:ci --workspace=packages/bruno-electron

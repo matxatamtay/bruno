@@ -4,9 +4,10 @@ module.exports = {
     '^.+\\.[jt]sx?$': 'babel-jest'
   },
   transformIgnorePatterns: [
-    '/node_modules/(?!strip-json-comments|nanoid|xml-formatter)/'
+    '/node_modules/(?!strip-json-comments|nanoid|xml-formatter|@xyflow)/'
   ],
   moduleNameMapper: {
+    '^.+\\.(css|scss)$': '<rootDir>/src/test-utils/mocks/style.js',
     '^assets/(.*)$': '<rootDir>/src/assets/$1',
     '^components/(.*)$': '<rootDir>/src/components/$1',
     '^hooks/(.*)$': '<rootDir>/src/hooks/$1',

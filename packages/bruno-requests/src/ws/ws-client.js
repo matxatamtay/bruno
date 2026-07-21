@@ -63,6 +63,7 @@ const createSequencer = () => {
    * @param {string} [collectionId]
    */
   const clean = (requestId, collectionId = undefined) => {
+    if (!seq[requestId]) return;
     if (collectionId) {
       delete seq[requestId][collectionId];
     }
@@ -198,7 +199,7 @@ class WsClient {
   sendMessage(requestId, collectionUid, message, format = 'raw') {
     const connectionMeta = this.activeConnections.get(requestId);
 
-    if (connectionMeta.connection && connectionMeta.connection.readyState === WebSocket.OPEN) {
+    if (connectionMeta?.connection && connectionMeta.connection.readyState === WebSocket.OPEN) {
       const payload = normalizeMessageByFormat(message, format);
 
       // Send the message
@@ -262,7 +263,8 @@ class WsClient {
       const meta = this.activeConnections.get(k);
       if (meta.collectionUid === collectionUid) {
         meta.connection.close();
-        this.activeConnections.delete(k);
+        this.#removeConnection(k);
+        seq.clean(k);
       }
     });
   }
@@ -273,13 +275,18 @@ class WsClient {
   clearAllConnections() {
     const connectionIds = this.getActiveConnectionIds();
 
-    this.activeConnections.forEach((connection) => {
-      if (connection.readyState === WebSocket.OPEN) {
-        connection.close(1000, 'Client clearing all connections');
+    this.activeConnections.forEach((entry, requestId) => {
+      if (entry?.connection && entry.connection.readyState <= WebSocket.OPEN) {
+        entry.connection.close(1000, 'Client clearing all connections');
       }
+      this.#removeConnection(requestId);
+      seq.clean(requestId);
     });
 
     this.activeConnections.clear();
+    this.messageQueues = {};
+    for (const handle of this.connectionKeepAlive.values()) clearInterval(handle);
+    this.connectionKeepAlive.clear();
 
     // Emit an event with empty active connection IDs
     if (connectionIds.length > 0) {

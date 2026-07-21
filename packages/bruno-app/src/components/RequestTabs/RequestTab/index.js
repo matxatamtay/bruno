@@ -193,6 +193,7 @@ const RequestTab = ({ tab, collection, tabIndex, collectionRequestTabs, folderUi
     'preferences',
     'workspaceOverview',
     'workspaceEnvironments',
+    'workspaceFlowStudio',
     'openapi-sync',
     'openapi-spec',
     'git-review',
@@ -226,6 +227,8 @@ const RequestTab = ({ tab, collection, tabIndex, collectionRequestTabs, folderUi
       } else {
         dispatch(closeTabs({ tabUids: [tab.uid] }));
       }
+    } else if (tab.type === 'workspaceFlowStudio') {
+      window.dispatchEvent(new Event('flow-studio-save'));
     } else if (tab.type === 'folder-settings') {
       if (folder?.draft) {
         setShowConfirmFolderClose(true);
@@ -492,6 +495,8 @@ const RequestTab = ({ tab, collection, tabIndex, collectionRequestTabs, folderUi
           <SpecialTab handleCloseClick={null} type={tab.type} />
         ) : tab.type === 'workspaceEnvironments' ? (
           <SpecialTab handleCloseClick={null} type={tab.type} hasDraft={hasGlobalEnvironmentDraft} />
+        ) : tab.type === 'workspaceFlowStudio' ? (
+          <SpecialTab handleCloseClick={null} type={tab.type} />
         ) : (
           <SpecialTab handleCloseClick={handleCloseClick} handleDoubleClick={() => dispatch(makeTabPermanent({ uid: tab.uid }))} type={tab.type} />
         )}

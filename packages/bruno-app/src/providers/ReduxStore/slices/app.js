@@ -82,6 +82,21 @@ const initialState = {
         customRedactedHeaders: [],
         customRedactedVariables: []
       }
+    },
+    mcp: {
+      enabled: false,
+      host: '127.0.0.1',
+      port: 3847,
+      allowRemote: false,
+      permissionProfile: 'read-only',
+      allowedWorkspaces: [],
+      allowedHosts: [],
+      allowPrivateHosts: false,
+      allowDynamicHosts: false,
+      auditEnabled: true,
+      rateLimitPerMinute: 120,
+      requestTimeoutMs: 120000,
+      maxRequestFiles: 10000
     }
   },
   generateCode: {

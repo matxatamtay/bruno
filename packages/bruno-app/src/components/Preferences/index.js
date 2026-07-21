@@ -10,7 +10,8 @@ import {
   IconKeyboard,
   IconZoomQuestion,
   IconSquareLetterB,
-  IconDatabase
+  IconDatabase,
+  IconPlugConnected
 } from '@tabler/icons';
 
 import IconSparkles from 'components/Icons/IconSparkles';
@@ -25,6 +26,7 @@ import AI from './AI';
 
 import StyledWrapper from './StyledWrapper';
 import Cache from './Cache/index';
+import Mcp from './Mcp';
 
 const Preferences = () => {
   const dispatch = useDispatch();
@@ -77,6 +79,10 @@ const Preferences = () => {
       case 'cache': {
         return <Cache />;
       }
+
+      case 'mcp': {
+        return <Mcp />;
+      }
     }
   };
 
@@ -111,6 +117,10 @@ const Preferences = () => {
           <div className={getTabClassname('cache')} role="tab" onClick={() => setTab('cache')}>
             <IconDatabase size={16} strokeWidth={1.5} />
             Cache
+          </div>
+          <div className={getTabClassname('mcp')} role="tab" onClick={() => setTab('mcp')}>
+            <IconPlugConnected size={16} strokeWidth={1.5} />
+            MCP
           </div>
           <div className={getTabClassname('support')} role="tab" onClick={() => setTab('support')}>
             <IconZoomQuestion size={16} strokeWidth={1.5} />

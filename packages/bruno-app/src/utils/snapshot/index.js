@@ -15,6 +15,7 @@ const SINGLETON_TAB_TYPES = new Set([
   'preferences',
   'workspaceOverview',
   'workspaceEnvironments',
+  'workspaceFlowStudio',
   'openapi-sync',
   'openapi-spec',
   'git-review',
@@ -35,7 +36,8 @@ const IGNORED_TAB_TYPES = new Set([
 
 export const WORKSPACE_TAB_UID_SUFFIX_BY_TYPE = {
   workspaceOverview: 'overview',
-  workspaceEnvironments: 'environments'
+  workspaceEnvironments: 'environments',
+  workspaceFlowStudio: 'flows'
 };
 
 export const WORKSPACE_TAB_TYPES = new Set(Object.keys(WORKSPACE_TAB_UID_SUFFIX_BY_TYPE));
