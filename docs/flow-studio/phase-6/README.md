@@ -75,7 +75,9 @@ Execution requires an explicit host allowlist. Controls include:
 
 A URL containing `{{variable}}` or `${VARIABLE}` is classified as dynamic before URL parsing and fails closed by default.
 
-## Tools
+## Historical MCP tools
+
+> Superseded by the collection-native [Bruno Desktop MCP](../../mcp/README.md). Flow Studio tools, permission profiles, network allowlists, approvals, redacted projections, and flow patch tools are no longer part of the live Bruno MCP surface.
 
 ### Discovery and reads
 

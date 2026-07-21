@@ -1,6 +1,7 @@
 import React, { memo } from 'react';
 import { Handle, Position, NodeResizer } from '@xyflow/react';
 import { IconAlertTriangle, IconBraces, IconDatabase, IconGitBranch, IconPlayerPlay, IconSquare, IconWorld } from '@tabler/icons';
+import { formatRequestValue } from '../request-shape';
 
 const NodeShell = ({ children, issueCount, searchMatch, runtime, className = '' }) => {
   const runtimeStatus = runtime?.status || 'idle';
@@ -20,18 +21,70 @@ const NodeShell = ({ children, issueCount, searchMatch, runtime, className = '' 
   );
 };
 
+const ROOT_PATH = String.fromCharCode(36);
+
+const readPath = (value, path) => {
+  const normalized = String(path || 'value').replace(/^value(?:\.|$)/, '');
+  if (!normalized) return value;
+  return normalized.replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean).reduce((current, part) => current?.[part], value);
+};
+
+const selectedDynamicValue = (flow, sourceNodeId, sourcePath) => {
+  const source = flow?.nodes?.find((candidate) => candidate.id === sourceNodeId);
+  if (source?.kind !== 'dynamic-data') return null;
+  const options = Array.isArray(source.config?.options) ? source.config.options : [];
+  const selected = options.find((option) => option.id === source.config?.selectedOptionId) || options[0];
+  return selected ? { label: selected.label, value: readPath(selected.value, sourcePath) } : null;
+};
+
+const compactRequestFields = (shape) => [
+  ...(shape?.pathParams || []).map((field) => ({ channel: 'path', key: field.name, value: field.value })),
+  ...(shape?.query || []).map((field) => ({ channel: 'query', key: field.name, value: field.value })),
+  ...(shape?.bodyFields || []).filter((field) => field.key !== ROOT_PATH).map((field) => ({ channel: 'body', key: field.key, value: field.value }))
+];
+
 export const FlowRequestNode = memo(({ data }) => {
   const node = data.entity;
   const method = node.requestRef?.expectedMethod || node.kind.replace('-unary', '');
   const asset = node.config?.asset || {};
+  const fields = compactRequestFields(data.requestShape).slice(0, 5);
+  const configuredCount = Object.values(node.config?.requestOverrides || {}).reduce((total, values) => total + Object.keys(values || {}).length, 0) + (data.bindingCount || 0);
   return (
     <NodeShell issueCount={data.issueCount} searchMatch={data.searchMatch} runtime={data.runtime} className="flow-request-node">
       <Handle id="control-in" type="target" position={Position.Left} className="flow-control-handle" />
       <Handle id="data-in" type="target" position={Position.Top} className="flow-data-handle" />
-      <div className="flow-node-kicker"><span>{method}</span><span>{data.bindingCount || 0} bindings</span></div>
+      <div className="flow-node-kicker"><span>{method}</span><span>{configuredCount} configured</span></div>
       <div className="flow-node-title">{node.name || node.semanticKey}</div>
       <div className="flow-node-meta">{asset.collectionName || node.requestRef?.collectionPath}</div>
       <div className="flow-node-meta flow-node-path">{asset.itemName || node.requestRef?.itemPathname}</div>
+      {fields.length > 0 && (
+        <div className="flow-request-node-fields">
+          {fields.map((field) => {
+            const directBinding = node.config?.bindings?.[field.channel]?.[field.key];
+            const rootBinding = field.channel === 'body' ? node.config?.bindings?.body?.[ROOT_PATH] : null;
+            const binding = directBinding || rootBinding;
+            const directOverride = node.config?.requestOverrides?.[field.channel]?.[field.key];
+            const rootOverride = field.channel === 'body' ? node.config?.requestOverrides?.body?.[ROOT_PATH] : undefined;
+            const override = directOverride !== undefined
+              ? directOverride
+              : (rootOverride !== undefined ? readPath(rootOverride, field.key) : undefined);
+            const dynamicRoot = binding ? selectedDynamicValue(data.flow, binding.sourceNodeId, binding.sourcePath) : null;
+            const dynamic = dynamicRoot && rootBinding && !directBinding
+              ? { ...dynamicRoot, value: readPath(dynamicRoot.value, field.key) }
+              : dynamicRoot;
+            const value = dynamic?.value ?? override ?? field.value;
+            const source = dynamic?.label || (binding ? data.flow?.nodes?.find((candidate) => candidate.id === binding.sourceNodeId)?.name : (override !== undefined ? 'flow' : 'request'));
+            return (
+              <div key={`${field.channel}:${field.key}`}>
+                <span>{field.key}</span>
+                <code>{formatRequestValue(value) || 'empty'}</code>
+                <small>{source}</small>
+              </div>
+            );
+          })}
+          {compactRequestFields(data.requestShape).length > fields.length && <div className="flow-request-node-more">+{compactRequestFields(data.requestShape).length - fields.length} more</div>}
+        </div>
+      )}
       <Handle id="control-out" type="source" position={Position.Right} className="flow-control-handle" />
       <Handle id="failure" type="source" position={Position.Bottom} className="flow-control-handle flow-failure-handle" title="Failure route" />
     </NodeShell>
@@ -48,11 +101,31 @@ const inputIcon = (kind) => {
 export const FlowInputNode = memo(({ data }) => {
   const node = data.entity;
   const value = node.config?.value ?? node.config?.variable ?? node.config?.datasetPath ?? node.config?.fieldName ?? '';
+  const options = node.kind === 'dynamic-data' && Array.isArray(node.config?.options) ? node.config.options : [];
+  const selectedOptionId = node.config?.selectedOptionId || options[0]?.id;
   return (
-    <NodeShell issueCount={data.issueCount} searchMatch={data.searchMatch} runtime={data.runtime} className="flow-input-node">
+    <NodeShell issueCount={data.issueCount} searchMatch={data.searchMatch} runtime={data.runtime} className={`flow-input-node ${node.kind === 'dynamic-data' ? 'flow-dynamic-data-node' : ''}`}>
       <div className="flow-node-kicker"><span className="inline-flex items-center gap-1">{inputIcon(node.kind)} input</span></div>
       <div className="flow-node-title">{node.name || node.semanticKey}</div>
-      <div className="flow-node-meta flow-node-path">{String(value || node.config?.outputPath || 'value')}</div>
+      {node.kind === 'dynamic-data' ? (
+        <div className="flow-dynamic-options nodrag nowheel">
+          {options.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={selectedOptionId === option.id ? 'active' : ''}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onDynamicOptionSelect?.(node.id, option.id);
+              }}
+              title={formatRequestValue(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      ) : <div className="flow-node-meta flow-node-path">{String(value || node.config?.outputPath || 'value')}</div>}
       <Handle id="data-out" type="source" position={Position.Right} className="flow-data-handle" />
     </NodeShell>
   );

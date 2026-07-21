@@ -180,6 +180,8 @@ export class FlowStore {
           revision: record.flow.revision,
           updatedAt: record.flow.metadata.updatedAt,
           tags: record.flow.metadata.tags || [],
+          inputSchema: record.flow.inputSchema,
+          outputSchema: record.flow.outputSchema,
           status: 'valid' as const
         };
       } catch (error) {

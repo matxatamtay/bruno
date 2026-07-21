@@ -48,11 +48,25 @@ export const runtimeProjectionReducer = (state, action) => {
   }
   if (action.type === 'result') {
     if (state.runId && action.result?.runId && action.result.runId !== state.runId) return state;
+    const result = action.result || null;
+    const resultNodeIds = new Set([
+      ...Object.keys(result?.results || {}),
+      ...Object.keys(result?.previews || {})
+    ]);
+    const nodes = { ...state.nodes };
+    resultNodeIds.forEach((nodeId) => {
+      nodes[nodeId] = {
+        ...(nodes[nodeId] || { status: result?.status === 'success' ? 'success' : 'idle' }),
+        ...(result?.results?.[nodeId] ? { result: result.results[nodeId] } : {}),
+        ...(result?.previews?.[nodeId] ? { preview: result.previews[nodeId] } : {})
+      };
+    });
     return {
       ...state,
-      status: action.result?.status || state.status,
-      result: action.result || null,
-      error: action.result?.error || null
+      status: result?.status || state.status,
+      nodes,
+      result,
+      error: result?.error || null
     };
   }
   if (action.type !== 'event') return state;

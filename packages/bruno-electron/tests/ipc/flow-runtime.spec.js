@@ -2,7 +2,8 @@ const mockHandlers = new Map();
 
 jest.mock('electron', () => ({
   ipcMain: {
-    handle: jest.fn((channel, handler) => mockHandlers.set(channel, handler))
+    handle: jest.fn((channel, handler) => mockHandlers.set(channel, handler)),
+    on: jest.fn()
   }
 }));
 
@@ -13,6 +14,7 @@ describe('flow runtime IPC adapter', () => {
   beforeEach(() => {
     mockHandlers.clear();
     require('electron').ipcMain.handle.mockClear();
+    require('electron').ipcMain.on.mockClear();
   });
 
   it('registers run, cancel and preview channels against one runtime service', () => {

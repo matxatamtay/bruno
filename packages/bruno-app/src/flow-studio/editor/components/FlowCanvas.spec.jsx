@@ -1,10 +1,18 @@
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { createAuthoringFlow, FLOW_ASSET_MIME, FLOW_ASSET_TEXT_PREFIX } from '../model';
+import {
+  FLOW_ASSET_MIME,
+  FLOW_ASSET_TEXT_PREFIX,
+  FLOW_OUTPUT_MIME,
+  addNode,
+  createAuthoringFlow,
+  createRequestNodeFromAsset
+} from '../model';
 import AssetsPanel from './AssetsPanel';
 import FlowCanvas from './FlowCanvas';
 
 const mockFitView = jest.fn();
+const mockGetNodes = jest.fn(() => []);
 const mockScreenToFlowPosition = jest.fn(({ x, y }) => ({ x, y }));
 
 jest.mock('@xyflow/react', () => ({
@@ -23,7 +31,7 @@ jest.mock('@xyflow/react', () => ({
   ),
   applyEdgeChanges: (changes, edges) => edges,
   applyNodeChanges: (changes, nodes) => nodes,
-  useReactFlow: () => ({ fitView: mockFitView, screenToFlowPosition: mockScreenToFlowPosition })
+  useReactFlow: () => ({ fitView: mockFitView, getNodes: mockGetNodes, screenToFlowPosition: mockScreenToFlowPosition })
 }));
 
 jest.mock('./FlowNodes', () => ({ flowNodeTypes: {} }));
@@ -42,12 +50,13 @@ const requestAsset = {
   method: 'POST'
 };
 
-const renderCanvas = () => {
-  const flow = createAuthoringFlow({
-    uid: 'flow_drop_test',
-    name: 'Drop test',
-    workspaceUid: 'workspace_drop_test'
-  });
+const createFlow = () => createAuthoringFlow({
+  uid: 'flow_drop_test',
+  name: 'Drop test',
+  workspaceUid: 'workspace_drop_test'
+});
+
+const renderCanvas = (flow = createFlow()) => {
   const onCommit = jest.fn();
   const onSelectionChange = jest.fn();
   render(
@@ -67,6 +76,12 @@ const renderCanvas = () => {
 };
 
 describe('Flow Studio canvas asset drop', () => {
+  beforeEach(() => {
+    mockGetNodes.mockReset();
+    mockGetNodes.mockReturnValue([]);
+    mockScreenToFlowPosition.mockReset();
+    mockScreenToFlowPosition.mockImplementation(({ x, y }) => ({ x, y }));
+  });
   it('drags a request from the Assets panel through the shared DataTransfer into the canvas', () => {
     mockScreenToFlowPosition.mockReturnValueOnce({ x: 360, y: 200 });
     const { onCommit } = renderCanvas();
@@ -155,6 +170,50 @@ describe('Flow Studio canvas asset drop', () => {
       kind: 'http',
       position: { x: 120, y: 80 }
     });
+  });
+
+  it('maps a dragged response field into the request node under the drop point', () => {
+    let flow = createFlow();
+    const source = createRequestNodeFromAsset(flow, { ...requestAsset, id: 'accounts:create-user', itemUid: 'create-user' }, { x: 100, y: 100 });
+    flow = addNode(flow, source);
+    const target = createRequestNodeFromAsset(flow, {
+      ...requestAsset,
+      id: 'accounts:update-user',
+      itemUid: 'update-user',
+      itemPathname: 'users/update.bru',
+      name: 'Update user',
+      method: 'PATCH'
+    }, { x: 420, y: 160 });
+    flow = addNode(flow, target);
+    mockGetNodes.mockReturnValue([
+      { id: source.id, position: source.position, width: 190, height: 90 },
+      { id: target.id, position: target.position, width: 190, height: 90 }
+    ]);
+    mockScreenToFlowPosition.mockReturnValueOnce({ x: 450, y: 180 });
+    const { onCommit } = renderCanvas(flow);
+    const payload = JSON.stringify({ sourceNodeId: source.id, sourcePath: 'response.body.data.userId' });
+    const dataTransfer = {
+      getData: jest.fn((type) => type === FLOW_OUTPUT_MIME ? payload : '')
+    };
+
+    fireEvent.drop(screen.getByTestId('react-flow-pane'), {
+      clientX: 450,
+      clientY: 180,
+      dataTransfer
+    });
+
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    const [nextFlow] = onCommit.mock.calls[0];
+    expect(nextFlow.nodes.find((node) => node.id === target.id).config.bindings.runtime.userId).toMatchObject({
+      sourceNodeId: source.id,
+      sourcePath: 'response.body.data.userId'
+    });
+    expect(nextFlow.dataEdges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: { nodeId: source.id, path: 'response.body.data.userId' },
+        target: { nodeId: target.id, path: 'runtime.userId' }
+      })
+    ]));
   });
 
   it.each([

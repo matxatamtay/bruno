@@ -346,6 +346,16 @@ describe('deserializeTab', () => {
     expect(tab.uid).toBe('collection-uid-global-environment-settings');
   });
 
+  it('restores Flow Studio uid scoped to collection uid', () => {
+    const tab = deserializeTab({
+      type: 'flow-studio',
+      accessor: 'type',
+      permanent: true
+    }, collection);
+
+    expect(tab.uid).toBe('collection-uid-flow-studio');
+  });
+
   it('restores web recorder uid scoped to collection uid', () => {
     const tab = deserializeTab({
       type: 'web-recorder',

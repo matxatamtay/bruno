@@ -96,6 +96,15 @@ export const resolveInputNode = (
       secret: node.kind === 'secret-reference' || Boolean(entry.secret) || Boolean(node.config?.secret),
       provenance: [{ kind: 'environment', nodeId: node.id, path: variable }]
     });
+  } else if (node.kind === 'dynamic-data') {
+    const options = Array.isArray(node.config?.options) ? node.config.options as Record<string, unknown>[] : [];
+    const selectedId = String(node.config?.selectedOptionId || options[0]?.id || '');
+    const selected = options.find((option) => String(option.id) === selectedId) || options[0];
+    if (!selected) throw new Error(`Dynamic data node ${node.id} has no cases`);
+    runtimeValue = createRuntimeValue(selected.value, {
+      secret: Boolean(node.config?.secret),
+      provenance: [{ kind: 'input', nodeId: node.id, path: outputPath, detail: `dynamic-data:${String(selected.id || '')}` }]
+    });
   } else if (node.kind === 'dataset-input') {
     const datasetPath = String(node.config?.datasetPath || '');
     const value = getPathValue(context.dataset, datasetPath);

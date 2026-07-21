@@ -9,6 +9,18 @@ import {
 } from '../model';
 import Inspector from './Inspector';
 
+const requestAsset = {
+  collectionUid: 'accounts',
+  collectionName: 'Accounts',
+  collectionPath: '.',
+  itemUid: 'update-user',
+  itemPathname: 'users/update.bru',
+  name: 'Update user',
+  breadcrumb: 'Users',
+  type: 'http-request',
+  method: 'PATCH'
+};
+
 const createFixture = () => {
   let flow = createAuthoringFlow({
     uid: 'flow_inspector',
@@ -16,24 +28,17 @@ const createFixture = () => {
     workspaceUid: 'workspace_local',
     now: new Date('2026-07-20T00:00:00.000Z')
   });
-  const input = createInputNode(flow, 'static-input', { x: 260, y: 160 }, {
-    name: 'Customer context',
-    value: '{"id":"cus_1"}',
+  const response = createInputNode(flow, 'response-extractor', { x: 260, y: 160 }, {
+    name: 'Created customer id',
+    sourceNodeId: 'create-user',
+    sourcePath: 'response.body',
+    path: 'customer.id',
     outputPath: 'value'
   });
-  flow = addNode(flow, input);
-  const request = createRequestNodeFromAsset(flow, {
-    collectionUid: 'accounts',
-    collectionName: 'Accounts',
-    collectionPath: 'collections/accounts',
-    itemUid: 'create-user',
-    itemPathname: 'users/create.bru',
-    name: 'Create user',
-    type: 'http-request',
-    method: 'POST'
-  }, { x: 520, y: 220 });
+  flow = addNode(flow, response);
+  const request = createRequestNodeFromAsset(flow, requestAsset, { x: 520, y: 220 });
   flow = addNode(flow, request);
-  return { flow, input, request };
+  return { flow, response, request };
 };
 
 const Harness = ({ initialFlow, requestId }) => {
@@ -45,6 +50,8 @@ const Harness = ({ initialFlow, requestId }) => {
         selection={{ nodeIds: [requestId], frameIds: [], controlEdgeIds: [], dataEdgeIds: [] }}
         validation={{ issues: [] }}
         onCommit={(next) => setFlow(next)}
+        requestAsset={requestAsset}
+        environmentName="Local"
       />
       <pre data-testid="inspector-flow-state">{JSON.stringify(flow)}</pre>
     </>
@@ -53,32 +60,35 @@ const Harness = ({ initialFlow, requestId }) => {
 
 const readFlow = () => JSON.parse(screen.getByTestId('inspector-flow-state').textContent);
 
-const addBinding = ({ channel, key }) => {
-  fireEvent.change(screen.getByDisplayValue(/body|query|header/), { target: { value: channel } });
-  fireEvent.change(screen.getByPlaceholderText(channel === 'header' ? 'Authorization' : 'customerId'), { target: { value: key } });
-  fireEvent.click(screen.getByRole('button', { name: 'Add binding' }));
+const addRuntimeBinding = (key) => {
+  fireEvent.click(screen.getByRole('tab', { name: 'Input mapping' }));
+  fireEvent.change(screen.getByPlaceholderText('Runtime variable, e.g. customerId'), { target: { value: key } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add mapping' }));
 };
 
 describe('Flow Studio inspector bindings', () => {
-  it('authors body, query and header bindings through inspector controls', () => {
+  it('shows the canonical request inline and authors runtime-variable mappings', () => {
     const fixture = createFixture();
     render(<Harness initialFlow={fixture.flow} requestId={fixture.request.id} />);
 
-    addBinding({ channel: 'body', key: 'customer.id' });
-    addBinding({ channel: 'query', key: 'expand' });
-    addBinding({ channel: 'header', key: 'X-Customer-Id' });
+    expect(screen.getByText('Accounts')).toBeInTheDocument();
+    expect(screen.getByText('Users / Update user')).toBeInTheDocument();
+    expect(screen.getByText('Local')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Request' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('button', { name: /Open request in Bruno/i })).not.toBeInTheDocument();
+
+    addRuntimeBinding('customerId');
 
     const flow = readFlow();
     const request = flow.nodes.find((node) => node.id === fixture.request.id);
     expect(request.config.bindings).toMatchObject({
-      body: { 'customer.id': { sourceNodeId: fixture.input.id, sourcePath: 'value' } },
-      query: { expand: { sourceNodeId: fixture.input.id, sourcePath: 'value' } },
-      header: { 'X-Customer-Id': { sourceNodeId: fixture.input.id, sourcePath: 'value' } }
+      runtime: { customerId: { sourceNodeId: fixture.response.id, sourcePath: 'value' } }
     });
-    expect(flow.dataEdges.map((edge) => edge.target.path).sort()).toEqual([
-      'request.body.customer.id',
-      'request.header.X-Customer-Id',
-      'request.query.expand'
+    expect(flow.dataEdges).toEqual([
+      expect.objectContaining({
+        source: { nodeId: fixture.response.id, path: 'value' },
+        target: { nodeId: fixture.request.id, path: 'runtime.customerId' }
+      })
     ]);
   });
 
@@ -105,6 +115,7 @@ describe('Flow Studio inspector bindings', () => {
     joinMount.unmount();
 
     render(<Harness initialFlow={flow} requestId={fixture.request.id} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Execution' }));
     fireEvent.change(screen.getByLabelText('Side effect'), { target: { value: 'idempotent' } });
     fireEvent.change(screen.getByLabelText('Resume behavior'), { target: { value: 'reuse' } });
     fireEvent.click(screen.getByLabelText('Allow retry'));
@@ -118,16 +129,16 @@ describe('Flow Studio inspector bindings', () => {
     });
   });
 
-  it('removes a binding and its data edge together', () => {
+  it('removes a runtime-variable mapping and its data edge together', () => {
     const fixture = createFixture();
     render(<Harness initialFlow={fixture.flow} requestId={fixture.request.id} />);
-    addBinding({ channel: 'body', key: 'email' });
+    addRuntimeBinding('customerId');
 
     fireEvent.click(screen.getByTitle('Remove binding'));
 
     const flow = readFlow();
     const request = flow.nodes.find((node) => node.id === fixture.request.id);
-    expect(request.config.bindings.body).toEqual({});
+    expect(request.config.bindings.runtime).toEqual({});
     expect(flow.dataEdges).toEqual([]);
   });
 });

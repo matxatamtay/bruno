@@ -71,7 +71,7 @@ describe('RunConsole', () => {
     expect(document.body.textContent).not.toContain('raw-checkpoint-secret');
   });
 
-  it('shows streamed events and only a safe resolved request preview', () => {
+  it('shows streamed events and only a safe Bruno request mapping preview', () => {
     render(
       <RunConsole
         flow={flow}
@@ -87,13 +87,15 @@ describe('RunConsole', () => {
           url: 'https://api.test/one',
           query: { id: '7' },
           headers: { Authorization: '[REDACTED]' },
-          body: { privateValue: '[REDACTED]', visible: true },
-          provenance: { 'request.header.Authorization': [{ kind: 'environment', nodeId: 'env_auth' }] }
+          body: { privateValue: '{{privateValue}}', visible: true },
+          runtimeVariables: { userId: 'user-7' },
+          provenance: { 'runtime.userId': [{ kind: 'response', nodeId: 'request_0' }] }
         }}
       />
     );
 
     expect(screen.getByText('node · started')).toBeInTheDocument();
+    expect(screen.getByText('Runtime variables')).toBeInTheDocument();
     expect(screen.getAllByText(/REDACTED/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/real-secret/)).not.toBeInTheDocument();
     expect(screen.getByTestId('flow-cancel-button')).toBeEnabled();

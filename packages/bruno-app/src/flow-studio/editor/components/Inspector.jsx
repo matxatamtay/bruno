@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { IconAlertTriangle, IconLink, IconPlus, IconTrash } from '@tabler/icons';
 import {
-  BINDING_CHANNELS,
+  ALL_BINDING_CHANNELS,
   CONTROL_NODE_KINDS,
   DATA_NODE_KINDS,
   INPUT_NODE_KINDS,
@@ -16,6 +16,9 @@ import {
   updateNode
 } from '../model';
 import { getIssuesForEntity } from '../validation';
+import RequestNodeInspector from './RequestNodeInspector';
+import FlowContractEditor from './FlowContractEditor';
+import DynamicDataEditor from './DynamicDataEditor';
 
 const Field = ({ label, value, onCommit, multiline = false, type = 'text' }) => {
   const [draft, setDraft] = useState(value ?? '');
@@ -67,9 +70,9 @@ const CheckboxField = ({ label, checked, onCommit }) => (
   </label>
 );
 
-const BindingEditor = ({ flow, node, onCommit }) => {
+export const LegacyBindingEditor = ({ flow, node, onCommit }) => {
   const inputs = flow.nodes.filter((candidate) => DATA_NODE_KINDS.has(candidate.kind));
-  const [channel, setChannel] = useState('body');
+  const [channel] = useState('runtime');
   const [key, setKey] = useState('');
   const [sourceNodeId, setSourceNodeId] = useState(inputs[0]?.id || '');
   const [sourcePath, setSourcePath] = useState('value');
@@ -77,7 +80,7 @@ const BindingEditor = ({ flow, node, onCommit }) => {
     if (!inputs.some((input) => input.id === sourceNodeId)) setSourceNodeId(inputs[0]?.id || '');
   }, [inputs, sourceNodeId]);
 
-  const bindings = BINDING_CHANNELS.flatMap((bindingChannel) => Object.entries(node.config?.bindings?.[bindingChannel] || {}).map(([bindingKey, binding]) => ({
+  const bindings = ALL_BINDING_CHANNELS.flatMap((bindingChannel) => Object.entries(node.config?.bindings?.[bindingChannel] || {}).map(([bindingKey, binding]) => ({
     channel: bindingChannel,
     key: bindingKey,
     ...binding
@@ -98,13 +101,14 @@ const BindingEditor = ({ flow, node, onCommit }) => {
 
   return (
     <div className="flow-binding-editor">
-      <div className="flow-inspector-section-title"><IconLink size={14} /> Data bindings</div>
-      {bindings.length === 0 && <div className="flow-empty-copy">Connect an input node or add a binding below.</div>}
+      <div className="flow-inspector-section-title"><IconLink size={14} /> Bruno runtime variables</div>
+      <div className="flow-empty-copy">Map a previous response value to a runtime variable used by this request, for example <code>{'{{customerId}}'}</code>.</div>
+      {bindings.length === 0 && <div className="flow-empty-copy">No runtime variable mappings yet.</div>}
       {bindings.map((binding) => {
         const source = flow.nodes.find((candidate) => candidate.id === binding.sourceNodeId);
         return (
           <div key={`${binding.channel}:${binding.key}`} className="flow-binding-row">
-            <span className="flow-binding-channel">{binding.channel}</span>
+            <span className="flow-binding-channel">{binding.channel === 'runtime' ? 'runtime var' : `legacy ${binding.channel}`}</span>
             <span className="flow-binding-copy"><strong>{binding.key}</strong><small>{source?.name || binding.sourceNodeId}.{binding.sourcePath}</small></span>
             <button
               type="button"
@@ -117,10 +121,7 @@ const BindingEditor = ({ flow, node, onCommit }) => {
         );
       })}
       <div className="flow-binding-form">
-        <select value={channel} onChange={(event) => setChannel(event.target.value)}>
-          {BINDING_CHANNELS.map((value) => <option key={value} value={value}>{value}</option>)}
-        </select>
-        <input value={key} onChange={(event) => setKey(event.target.value)} placeholder={channel === 'header' ? 'Authorization' : 'customerId'} />
+        <input value={key} onChange={(event) => setKey(event.target.value)} placeholder="Runtime variable, e.g. customerId" />
         <select value={sourceNodeId} onChange={(event) => setSourceNodeId(event.target.value)}>
           <option value="">Select input</option>
           {inputs.map((input) => <option key={input.id} value={input.id}>{input.name || input.semanticKey}</option>)}
@@ -134,13 +135,26 @@ const BindingEditor = ({ flow, node, onCommit }) => {
   );
 };
 
-const Inspector = ({ flow, selection, validation, onCommit }) => {
+const Inspector = ({
+  flow,
+  selection,
+  validation,
+  onCommit,
+  requestAsset,
+  requestItem,
+  environmentName,
+  preview,
+  previewError,
+  previewing,
+  onPreview,
+  runtimeNode
+}) => {
   const entity = useMemo(() => findEntity(flow, selection), [flow, selection]);
   const issues = entity.value ? getIssuesForEntity(validation, entity.value.id) : [];
 
   if (!entity.value) {
     return (
-      <aside className="flow-inspector">
+      <aside className="flow-inspector" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
         <div className="flow-panel-heading">Inspector</div>
         <div className="flow-empty-copy flow-inspector-empty">Select a node, edge, or frame to edit it.</div>
       </aside>
@@ -149,7 +163,7 @@ const Inspector = ({ flow, selection, validation, onCommit }) => {
 
   const value = entity.value;
   return (
-    <aside className="flow-inspector">
+    <aside className="flow-inspector" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
       <div className="flow-panel-heading">Inspector</div>
       <div className="flow-inspector-kind">{entity.type}</div>
       {issues.length > 0 && (
@@ -172,19 +186,29 @@ const Inspector = ({ flow, selection, validation, onCommit }) => {
           />
           <Field label="Semantic key" value={value.semanticKey} onCommit={(semanticKey) => onCommit(updateNode(flow, value.id, { semanticKey }), { identity: true, nodeIds: [value.id] })} />
           <Field label="Kind" value={value.kind} onCommit={() => {}} />
-          {value.requestRef && (
-            <div className="flow-inspector-reference">
-              <span>Collection</span><strong>{value.requestRef.collectionPath}</strong>
-              <span>Request</span><strong>{value.requestRef.itemPathname}</strong>
-              <span>Method</span><strong>{value.requestRef.expectedMethod || value.kind}</strong>
-            </div>
+          {['start', 'end', 'subflow'].includes(value.kind) && <FlowContractEditor flow={flow} node={value} onCommit={onCommit} />}
+          {REQUEST_NODE_KINDS.has(value.kind) && (
+            <RequestNodeInspector
+              flow={flow}
+              node={value}
+              onCommit={onCommit}
+              requestAsset={requestAsset}
+              requestItem={requestItem}
+              environmentName={environmentName}
+              preview={preview}
+              previewError={previewError}
+              previewing={previewing}
+              onPreview={onPreview}
+              runtimeNode={runtimeNode}
+            />
           )}
           {(INPUT_NODE_KINDS.has(value.kind) || value.kind === 'secret-reference') && (
             <>
               <Field label="Output path" value={value.config?.outputPath || 'value'} onCommit={(outputPath) => onCommit(updateNode(flow, value.id, (node) => ({ ...node, config: { ...node.config, outputPath } })), { nodeIds: [value.id] })} />
               {value.kind === 'static-input' && <Field multiline label="Value" value={value.config?.value || ''} onCommit={(inputValue) => onCommit(updateNode(flow, value.id, (node) => ({ ...node, config: { ...node.config, value: inputValue } })), { nodeIds: [value.id] })} />}
-              {(value.kind === 'environment-input' || value.kind === 'secret-reference') && <Field label="Variable" value={value.config?.variable || ''} onCommit={(variable) => onCommit(updateNode(flow, value.id, (node) => ({ ...node, config: { ...node.config, variable } })), { nodeIds: [value.id] })} />}
+
               {value.kind === 'dataset-input' && <Field label="Dataset path" value={value.config?.datasetPath || ''} onCommit={(datasetPath) => onCommit(updateNode(flow, value.id, (node) => ({ ...node, config: { ...node.config, datasetPath } })), { nodeIds: [value.id] })} />}
+              {value.kind === 'dynamic-data' && <DynamicDataEditor flow={flow} node={value} onCommit={onCommit} />}
               {value.kind === 'form-input' && (
                 <>
                   <Field label="Field name" value={value.config?.fieldName || ''} onCommit={(fieldName) => onCommit(updateFormInputNode(flow, value.id, { fieldName }), { nodeIds: [value.id] })} />
@@ -208,6 +232,11 @@ const Inspector = ({ flow, selection, validation, onCommit }) => {
                 )}
               />
             </>
+          )}
+          {(value.kind === 'environment-input' || value.kind === 'secret-reference') && (
+            <div className="flow-legacy-node-warning">
+              Legacy environment node. New Flow Studio versions use the collection's normal Bruno environment and runtime-variable mappings instead.
+            </div>
           )}
           {value.kind === 'response-extractor' && (
             <>
@@ -334,7 +363,7 @@ const Inspector = ({ flow, selection, validation, onCommit }) => {
               <Field label="Output path" value={value.config?.outputPath || 'value'} onCommit={(outputPath) => onCommit(updateNode(flow, value.id, (node) => ({ ...node, config: { ...node.config, outputPath } })), { nodeIds: [value.id] })} />
             </>
           )}
-          {(REQUEST_NODE_KINDS.has(value.kind) || ['subflow', 'delay', 'fail'].includes(value.kind)) && (
+          {['subflow', 'delay', 'fail'].includes(value.kind) && (
             <>
               <div className="flow-inspector-section-title">Execution policy</div>
               <SelectField
@@ -376,7 +405,6 @@ const Inspector = ({ flow, selection, validation, onCommit }) => {
               />
             </>
           )}
-          {REQUEST_NODE_KINDS.has(value.kind) && <BindingEditor flow={flow} node={value} onCommit={onCommit} />}
         </>
       )}
 

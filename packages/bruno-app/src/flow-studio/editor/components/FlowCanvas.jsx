@@ -12,11 +12,15 @@ import { FlowGraphProjection } from '../graph-projection';
 import {
   FLOW_ASSET_MIME,
   FLOW_ASSET_TEXT_PREFIX,
+  FLOW_OUTPUT_MIME,
+  FLOW_OUTPUT_TEXT_PREFIX,
+  REQUEST_NODE_KINDS,
   addConnection,
   addNode,
   createControlNode,
   createInputNode,
   createRequestNodeFromAsset,
+  setNodeBinding,
   updateFrame,
   updateNode
 } from '../model';
@@ -32,7 +36,17 @@ const mergeProjected = (previous, projected) => {
   });
 };
 
+const EMPTY_REQUEST_ASSETS = [];
 const emptySelection = () => ({ nodeIds: [], frameIds: [], controlEdgeIds: [], dataEdgeIds: [] });
+
+const readFlowOutputPayload = (dataTransfer) => {
+  const customPayload = dataTransfer?.getData?.(FLOW_OUTPUT_MIME);
+  if (customPayload) return customPayload;
+  const textPayload = dataTransfer?.getData?.('text/plain');
+  return textPayload?.startsWith(FLOW_OUTPUT_TEXT_PREFIX)
+    ? textPayload.slice(FLOW_OUTPUT_TEXT_PREFIX.length)
+    : '';
+};
 
 const readFlowAssetPayload = (dataTransfer) => {
   const customPayload = dataTransfer?.getData?.(FLOW_ASSET_MIME);
@@ -52,16 +66,41 @@ const FlowCanvasInner = ({
   onCommit,
   onReplace,
   onProjectionMeasured,
-  runtimeProjection
+  runtimeProjection,
+  requestAssets = EMPTY_REQUEST_ASSETS
 }) => {
   const projectionRef = useRef(new FlowGraphProjection());
   const viewportReadyRef = useRef(Boolean(flow.viewport));
   const activeFlowUidRef = useRef(flow.uid);
-  const { screenToFlowPosition, fitView } = useReactFlow();
-  const projected = useMemo(
+  const { screenToFlowPosition, fitView, getNodes } = useReactFlow();
+  const selectDynamicOption = useCallback((nodeId, optionId) => {
+    onCommit(updateNode(flow, nodeId, (node) => ({
+      ...node,
+      config: { ...node.config, selectedOptionId: optionId }
+    })), { nodeIds: [nodeId] });
+  }, [flow, onCommit]);
+  const requestShapeByUid = useMemo(() => new Map(requestAssets.map((asset) => [asset.itemUid, asset.requestShape])), [requestAssets]);
+  const projectedBase = useMemo(
     () => projectionRef.current.project(flow, validation, searchQuery, runtimeProjection),
     [flow, validation, searchQuery, runtimeProjection]
   );
+  const projected = useMemo(() => ({
+    ...projectedBase,
+    nodes: projectedBase.nodes.map((canvasNode) => {
+      const entity = canvasNode.data?.entity;
+      return {
+        ...canvasNode,
+        data: {
+          ...canvasNode.data,
+          flow,
+          requestShape: entity?.requestRef
+            ? (requestShapeByUid.get(entity.requestRef.expectedItemUid) || entity.config?.asset?.requestShape || null)
+            : null,
+          onDynamicOptionSelect: selectDynamicOption
+        }
+      };
+    })
+  }), [flow, projectedBase, requestShapeByUid, selectDynamicOption]);
   const [nodes, setNodes] = useState(projected.nodes);
   const [edges, setEdges] = useState(projected.edges);
 
@@ -140,6 +179,37 @@ const FlowCanvasInner = ({
   const handleDrop = useCallback((event) => {
     event.preventDefault();
     event.stopPropagation();
+    const outputRaw = readFlowOutputPayload(event.dataTransfer);
+    if (outputRaw) {
+      let output;
+      try {
+        output = JSON.parse(outputRaw);
+      } catch (_) {
+        return;
+      }
+      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const targetCanvasNode = getNodes().find((candidate) => {
+        if (!REQUEST_NODE_KINDS.has(flow.nodes.find((node) => node.id === candidate.id)?.kind)) return false;
+        const width = candidate.measured?.width || candidate.width || 190;
+        const height = candidate.measured?.height || candidate.height || 90;
+        return position.x >= candidate.position.x && position.x <= candidate.position.x + width
+          && position.y >= candidate.position.y && position.y <= candidate.position.y + height;
+      });
+      if (!targetCanvasNode || !output?.sourceNodeId || !output?.sourcePath || targetCanvasNode.id === output.sourceNodeId) return;
+      const leaf = String(output.sourcePath).split(/[.\[\]]+/).filter(Boolean).at(-1) || 'value';
+      const key = leaf.replace(/[^a-zA-Z0-9_.-]+/g, '_');
+      const next = setNodeBinding(flow, {
+        targetNodeId: targetCanvasNode.id,
+        channel: 'runtime',
+        key,
+        sourceNodeId: output.sourceNodeId,
+        sourcePath: output.sourcePath
+      });
+      if (next === flow) return;
+      onCommit(next, { topology: true, nodeIds: [targetCanvasNode.id], dataEdgeIds: next.dataEdges.slice(-1).map((edge) => edge.id) });
+      onSelectionChange({ ...emptySelection(), nodeIds: [targetCanvasNode.id], focusNonce: Date.now() });
+      return;
+    }
     const raw = readFlowAssetPayload(event.dataTransfer);
     if (!raw) return;
     let asset;
@@ -152,12 +222,12 @@ const FlowCanvasInner = ({
     const node = asset.assetType === 'request'
       ? createRequestNodeFromAsset(flow, asset, position)
       : (asset.assetType === 'control'
-          ? createControlNode(flow, asset.kind, position, { name: asset.name })
+          ? createControlNode(flow, asset.kind, position, { ...asset, name: asset.name })
           : createInputNode(flow, asset.kind, position, { name: asset.name }));
     const next = addNode(flow, node);
     onCommit(next, { topology: true, nodeIds: [node.id] });
     onSelectionChange({ ...emptySelection(), nodeIds: [node.id], focusNonce: Date.now() });
-  }, [flow, onCommit, onSelectionChange, screenToFlowPosition]);
+  }, [flow, getNodes, onCommit, onSelectionChange, screenToFlowPosition]);
 
   const handleMoveEnd = useCallback((_, viewport) => {
     if (!viewport) return;
@@ -204,4 +274,4 @@ const FlowCanvasInner = ({
 };
 
 export default FlowCanvasInner;
-export { readFlowAssetPayload };
+export { readFlowAssetPayload, readFlowOutputPayload };

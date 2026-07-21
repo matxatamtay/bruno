@@ -142,7 +142,7 @@ describe('serializeSnapshot workspace tab restoration', () => {
     });
   });
 
-  it('records Flow Studio as the active workspace tab for restart restoration', async () => {
+  it('does not restore the retired workspace-scoped Flow Studio tab', async () => {
     const scratchCollectionUid = 'scratch-1';
     const state = makeState();
     state.workspaces.workspaces[0].scratchCollectionUid = scratchCollectionUid;
@@ -154,7 +154,7 @@ describe('serializeSnapshot workspace tab restoration', () => {
     });
 
     expect(snapshot.workspaces[0]).toMatchObject({
-      activeWorkspaceTabType: 'workspaceFlowStudio'
+      activeWorkspaceTabType: null
     });
   });
 

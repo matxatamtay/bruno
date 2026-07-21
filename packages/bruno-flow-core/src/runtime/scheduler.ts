@@ -1,7 +1,7 @@
 import { compileFlow } from '../compiler';
 import type { FlowControlEdge, FlowDataEdge, FlowDefinition, FlowNode, FlowRetryPolicy } from '../types';
 import { evaluateFlowCondition, type FlowConditionContext } from './condition';
-import { resolveInputNode, type FlowInputContext } from './input';
+import { resolveFlowInputs, resolveInputNode, type FlowInputContext } from './input';
 import {
   checkpointJournalMap,
   journalMapToRecord,
@@ -67,6 +67,7 @@ export interface DeterministicSchedulerOptions {
     asset: FlowRequestAsset;
     item: Record<string, unknown>;
     preview: ResolvedRequestPreview;
+    runtimeVariables: Record<string, unknown>;
     signal?: AbortSignal;
     runId: string;
   }) => Promise<FlowRequestExecution>;
@@ -127,7 +128,7 @@ interface BranchOutcome extends PathOutcome {
 }
 
 const REQUEST_KINDS = new Set(['http', 'graphql', 'websocket', 'grpc-unary', 'sse']);
-const INPUT_KINDS = new Set(['static-input', 'form-input', 'environment-input', 'dataset-input', 'secret-reference']);
+const INPUT_KINDS = new Set(['static-input', 'form-input', 'environment-input', 'dataset-input', 'dynamic-data', 'secret-reference']);
 const DATA_KINDS = new Set([...INPUT_KINDS, 'response-extractor', 'merge']);
 const HARD_DATASET_LIMIT = 100;
 const HARD_SUBFLOW_DEPTH = 8;
@@ -255,6 +256,18 @@ const rawOutputProjection = (outputs: FlowRuntimeOutputs): { value: Record<strin
       return [path, runtimeValue.value];
     }))
   ]));
+  return { value, secret };
+};
+
+const contractedOutputProjection = (flow: FlowDefinition, outputs: FlowRuntimeOutputs): { value: Record<string, unknown>; secret: boolean } => {
+  const endNode = flow.nodes.find((node) => node.kind === 'end');
+  const contracted = endNode ? outputs.get(endNode.id) : null;
+  if (!contracted || Object.keys(contracted).length === 0) return rawOutputProjection(outputs);
+  let secret = false;
+  const value = Object.fromEntries(Object.entries(contracted).map(([name, runtimeValue]) => {
+    secret ||= runtimeValue.secret;
+    return [name, runtimeValue.value];
+  }));
   return { value, secret };
 };
 
@@ -490,6 +503,11 @@ export class DeterministicFlowScheduler {
         const value = resolveDataEdge(edge, state);
         if (value) subflowInputs[edge.target.path.slice('subflow.input.'.length)] = value.value;
       });
+      const resolvedSubflowInputs = resolveFlowInputs(subflow.inputSchema, subflowInputs);
+      if (resolvedSubflowInputs.issues.length > 0) {
+        const details = resolvedSubflowInputs.issues.map((issue) => `${issue.path} ${issue.message}`).join(', ');
+        throw new Error(`Subflow ${subflow.name || subflow.uid} input contract failed: ${details}`);
+      }
 
       const runChild = async (childDataset: unknown, index?: number, childSignal = state.signal): Promise<FlowRunResult> => {
         const childScheduler = new DeterministicFlowScheduler({
@@ -506,7 +524,7 @@ export class DeterministicFlowScheduler {
         });
         return childScheduler.run({
           flow: subflow,
-          inputs: subflowInputs,
+          inputs: resolvedSubflowInputs.values,
           environmentValues: state.environmentValues,
           dataset: childDataset,
           signal: childSignal,
@@ -543,7 +561,7 @@ export class DeterministicFlowScheduler {
         } finally {
           state.signal?.removeEventListener('abort', abortDataset);
         }
-        const raw = childResults.map((result) => rawOutputProjection(getInternalFlowOutputs(result) || new Map()));
+        const raw = childResults.map((result) => contractedOutputProjection(subflow, getInternalFlowOutputs(result) || new Map()));
         return {
           result: createRuntimeValue(childResults.map((result) => ({
             runId: result.runId,
@@ -559,7 +577,7 @@ export class DeterministicFlowScheduler {
 
       const childResult = await runChild(state.dataset);
       if (childResult.status !== 'success') throw new Error(`Subflow ${node.id} failed: ${childResult.error?.message || childResult.status}`);
-      const raw = rawOutputProjection(getInternalFlowOutputs(childResult) || new Map());
+      const raw = contractedOutputProjection(subflow, getInternalFlowOutputs(childResult) || new Map());
       return {
         result: createRuntimeValue({
           runId: childResult.runId,
@@ -600,6 +618,7 @@ export class DeterministicFlowScheduler {
           asset,
           item: resolved.item,
           preview: resolved.preview,
+          runtimeVariables: resolved.runtimeVariables,
           signal: state.signal,
           runId: state.runId
         });
@@ -649,6 +668,50 @@ export class DeterministicFlowScheduler {
             })
           });
         }
+        return;
+      }
+
+      if (node.kind === 'end') {
+        const outputSchema = asRecord(state.flow.outputSchema);
+        const properties = asRecord(outputSchema.properties);
+        const contracted: FlowNodeOutput = {};
+        const requiredOutputs = new Set(Array.isArray(outputSchema.required) ? outputSchema.required.map(String) : []);
+        for (const [name, definitionValue] of Object.entries(properties)) {
+          const definition = asRecord(definitionValue);
+          const source = asRecord(definition['x-bruno-flow-source']);
+          const sourceNodeId = String(source.nodeId || '');
+          const sourcePath = String(source.path || 'response.body');
+          if (!sourceNodeId) continue;
+          try {
+            if (!state.outputs.has(sourceNodeId)) await resolveDataNode(sourceNodeId, state, dataStack);
+          } catch (error) {
+            if (requiredOutputs.has(name)) throw error;
+            continue;
+          }
+          const value = resolveOutputValue(state.outputs, sourceNodeId, sourcePath);
+          if (!value) {
+            if (requiredOutputs.has(name)) {
+              throw new Error(`Required flow output ${name} could not resolve ${sourceNodeId}.${sourcePath}`);
+            }
+            continue;
+          }
+          contracted[name] = appendProvenance(createRuntimeValue(value.value, {
+            secret: value.secret || definition.writeOnly === true,
+            provenance: value.provenance
+          }), {
+            kind: 'binding',
+            nodeId: node.id,
+            sourceNodeId,
+            path: `output.${name}`
+          });
+        }
+        const incoming = state.flow.dataEdges.filter((edge) => edge.target.nodeId === node.id && edge.target.path.startsWith('output.'));
+        for (const edge of incoming) {
+          await resolveDataNode(edge.source.nodeId, state, dataStack);
+          const value = resolveDataEdge(edge, state);
+          if (value) contracted[edge.target.path.slice('output.'.length)] = value;
+        }
+        state.outputs.set(node.id, contracted);
         return;
       }
 

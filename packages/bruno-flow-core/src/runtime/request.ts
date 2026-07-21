@@ -26,7 +26,12 @@ const scalarString = (value: unknown): string => {
   return String(value);
 };
 
-const upsertListValue = (list: unknown, name: string, value: unknown): unknown[] => {
+const upsertListValue = (
+  list: unknown,
+  name: string,
+  value: unknown,
+  type?: 'query' | 'path'
+): unknown[] => {
   const entries = Array.isArray(list) ? clone(list) as Record<string, unknown>[] : [];
   const index = entries.findIndex((entry) => entry.name === name || entry.key === name);
   const next = {
@@ -34,7 +39,8 @@ const upsertListValue = (list: unknown, name: string, value: unknown): unknown[]
     uid: index >= 0 ? entries[index].uid : undefined,
     name,
     value: scalarString(value),
-    enabled: true
+    enabled: true,
+    ...(type ? { type } : {})
   };
   if (next.uid === undefined) delete next.uid;
   if (index >= 0) entries[index] = next;
@@ -47,7 +53,11 @@ const parseJsonBody = (body: unknown): unknown => {
   const bodyRecord = body as Record<string, unknown>;
   if (bodyRecord.mode === 'json') {
     if (typeof bodyRecord.json === 'string' && bodyRecord.json.trim()) {
-      try { return JSON.parse(bodyRecord.json); } catch { return {}; }
+      try {
+        return JSON.parse(bodyRecord.json);
+      } catch {
+        return {};
+      }
     }
     if (bodyRecord.json && typeof bodyRecord.json === 'object') return clone(bodyRecord.json);
   }
@@ -56,7 +66,9 @@ const parseJsonBody = (body: unknown): unknown => {
 
 const injectBody = (request: Record<string, unknown>, path: string, value: unknown): void => {
   const existingBody = request.body;
-  const nextBodyValue = setPathValue(parseJsonBody(existingBody), path, value);
+  const nextBodyValue = path === '$' || !path
+    ? clone(value)
+    : setPathValue(parseJsonBody(existingBody), path, value);
   if (existingBody && typeof existingBody === 'object' && (existingBody as Record<string, unknown>).mode === 'json') {
     request.body = {
       ...(existingBody as Record<string, unknown>),
@@ -98,37 +110,51 @@ export interface ResolvedBindingProjection {
 export interface ResolvedRequestPreview {
   method: string | null;
   url: string | null;
+  pathParams: Record<string, unknown>;
   query: Record<string, unknown>;
   headers: Record<string, unknown>;
   body: unknown;
+  runtimeVariables: Record<string, unknown>;
   provenance: Record<string, FlowProvenanceEntry[]>;
   taint: Record<string, boolean>;
 }
 
-const previewList = (entries: unknown): Record<string, unknown> => Object.fromEntries((Array.isArray(entries) ? entries : [])
+const previewList = (entries: unknown, type?: 'query' | 'path'): Record<string, unknown> => Object.fromEntries((Array.isArray(entries) ? entries : [])
   .filter((entry) => entry && typeof entry === 'object' && (entry as Record<string, unknown>).enabled !== false)
+  .filter((entry) => !type || (type === 'query'
+    ? (entry as Record<string, unknown>).type !== 'path'
+    : (entry as Record<string, unknown>).type === 'path'))
   .map((entry) => {
     const record = entry as Record<string, unknown>;
     return [String(record.name || record.key || ''), record.value];
   })
   .filter(([key]) => key));
 
-const redactPath = (value: unknown, path: string): unknown => setPathValue(value, path, REDACTED_RUNTIME_VALUE);
+const redactPath = (value: unknown, path: string): unknown => (
+  path === '$' || !path ? REDACTED_RUNTIME_VALUE : setPathValue(value, path, REDACTED_RUNTIME_VALUE)
+);
 
 const createPreview = (
   item: Record<string, unknown>,
+  runtimeVariables: Record<string, unknown>,
   taint: Record<string, boolean>,
   provenance: Record<string, FlowProvenanceEntry[]>
 ): ResolvedRequestPreview => {
-  const request = (item.request || {}) as Record<string, unknown>;
-  const query = safeProjectUnknown(previewList(request.params)) as Record<string, unknown>;
+  const request = ((item.draft as Record<string, unknown> | undefined)?.request || item.request || {}) as Record<string, unknown>;
+  const pathParams = safeProjectUnknown(previewList(request.params, 'path')) as Record<string, unknown>;
+  const query = safeProjectUnknown(previewList(request.params, 'query')) as Record<string, unknown>;
   const headers = safeProjectUnknown(previewList(request.headers)) as Record<string, unknown>;
   let body = safeProjectUnknown(parseJsonBody(request.body));
+  const safeRuntimeVariables = safeProjectUnknown(runtimeVariables) as Record<string, unknown>;
 
   Object.entries(taint).forEach(([targetPath, secret]) => {
     if (!secret) return;
     const [, channel, ...parts] = targetPath.split('.');
     const key = parts.join('.');
+    if (targetPath.startsWith('runtime.')) {
+      safeRuntimeVariables[targetPath.slice('runtime.'.length)] = REDACTED_RUNTIME_VALUE;
+    }
+    if (channel === 'path') pathParams[key] = REDACTED_RUNTIME_VALUE;
     if (channel === 'query') query[key] = REDACTED_RUNTIME_VALUE;
     if (channel === 'header') headers[key] = REDACTED_RUNTIME_VALUE;
     if (channel === 'body') body = redactPath(body, key);
@@ -137,9 +163,11 @@ const createPreview = (
   return {
     method: typeof request.method === 'string' ? request.method : null,
     url: typeof request.url === 'string' ? request.url : null,
+    pathParams,
     query,
     headers,
     body,
+    runtimeVariables: safeRuntimeVariables,
     provenance,
     taint
   };
@@ -162,54 +190,86 @@ export const resolveRequestBindings = ({
   outputs: FlowRuntimeOutputs;
 }): {
   item: Record<string, unknown>;
+  runtimeVariables: Record<string, unknown>;
   preview: ResolvedRequestPreview;
   bindings: ResolvedBindingProjection[];
 } => {
   const resolvedItem = clone(item);
-  const request = clone((resolvedItem.request || {}) as Record<string, unknown>);
-  resolvedItem.request = request;
+  const draft = resolvedItem.draft as Record<string, unknown> | undefined;
+  const request = clone(((draft?.request || resolvedItem.request || {}) as Record<string, unknown>));
+  if (draft) resolvedItem.draft = { ...draft, request };
+  else resolvedItem.request = request;
+
+  const runtimeVariables: Record<string, unknown> = {};
   const provenance: Record<string, FlowProvenanceEntry[]> = {};
   const taint: Record<string, boolean> = {};
   const bindings: ResolvedBindingProjection[] = [];
+  const overrides = (node.config?.requestOverrides || {}) as Record<string, Record<string, unknown>>;
 
-  flow.dataEdges.filter((edge) => edge.target.nodeId === node.id && edge.target.path.startsWith('request.')).forEach((edge) => {
-    const runtimeValue = resolveEdgeValue(edge, outputs);
-    if (!runtimeValue) {
-      if (edge.required !== false) throw new Error(`Required binding ${edge.target.path} has no value`);
-      return;
-    }
-    const [, channel, ...parts] = edge.target.path.split('.');
-    const key = parts.join('.');
-    if (!key) throw new Error(`Binding target ${edge.target.path} is invalid`);
-    if (channel === 'query') request.params = upsertListValue(request.params, key, runtimeValue.value);
-    else if (channel === 'header') request.headers = upsertListValue(request.headers, key, runtimeValue.value);
-    else if (channel === 'body') injectBody(request, key, runtimeValue.value);
-    else throw new Error(`Unsupported request binding channel: ${channel}`);
+  Object.entries(overrides).forEach(([channel, values]) => {
+    Object.entries(values || {}).forEach(([key, value]) => {
+      const targetPath = channel === 'runtime' ? `runtime.${key}` : `request.${channel}.${key}`;
+      if (channel === 'runtime') runtimeVariables[key] = clone(value);
+      else if (channel === 'query') request.params = upsertListValue(request.params, key, value, 'query');
+      else if (channel === 'path') request.params = upsertListValue(request.params, key, value, 'path');
+      else if (channel === 'header') request.headers = upsertListValue(request.headers, key, value);
+      else if (channel === 'body') injectBody(request, key, value);
+      else return;
 
-    const secret = runtimeValue.secret || SENSITIVE_RUNTIME_KEY_PATTERN.test(edge.target.path);
-    const bindingProvenance = [...runtimeValue.provenance, {
-      kind: 'binding' as const,
-      nodeId: node.id,
-      sourceNodeId: edge.source.nodeId,
-      edgeId: edge.id,
-      path: edge.target.path
-    }];
-    provenance[edge.target.path] = bindingProvenance;
-    taint[edge.target.path] = secret;
-    bindings.push({
-      edgeId: edge.id,
-      sourceNodeId: edge.source.nodeId,
-      sourcePath: edge.source.path,
-      targetPath: edge.target.path,
-      secret,
-      value: secret ? REDACTED_RUNTIME_VALUE : safeProjectUnknown(runtimeValue.value),
-      provenance: bindingProvenance
+      const secret = SENSITIVE_RUNTIME_KEY_PATTERN.test(targetPath);
+      provenance[targetPath] = [{
+        kind: 'input',
+        nodeId: node.id,
+        path: targetPath,
+        detail: 'node-local override'
+      }];
+      taint[targetPath] = secret;
     });
   });
 
+  flow.dataEdges
+    .filter((edge) => edge.target.nodeId === node.id && (edge.target.path.startsWith('request.') || edge.target.path.startsWith('runtime.')))
+    .forEach((edge) => {
+      const runtimeValue = resolveEdgeValue(edge, outputs);
+      if (!runtimeValue) {
+        if (edge.required !== false) throw new Error(`Required binding ${edge.target.path} has no value`);
+        return;
+      }
+      const [root, channel, ...parts] = edge.target.path.split('.');
+      const key = root === 'runtime' ? [channel, ...parts].join('.') : parts.join('.');
+      if (!key) throw new Error(`Binding target ${edge.target.path} is invalid`);
+      if (root === 'runtime') runtimeVariables[key] = runtimeValue.value;
+      else if (channel === 'query') request.params = upsertListValue(request.params, key, runtimeValue.value, 'query');
+      else if (channel === 'path') request.params = upsertListValue(request.params, key, runtimeValue.value, 'path');
+      else if (channel === 'header') request.headers = upsertListValue(request.headers, key, runtimeValue.value);
+      else if (channel === 'body') injectBody(request, key, runtimeValue.value);
+      else throw new Error(`Unsupported request binding channel: ${channel}`);
+
+      const secret = runtimeValue.secret || SENSITIVE_RUNTIME_KEY_PATTERN.test(edge.target.path);
+      const bindingProvenance = [...runtimeValue.provenance, {
+        kind: 'binding' as const,
+        nodeId: node.id,
+        sourceNodeId: edge.source.nodeId,
+        edgeId: edge.id,
+        path: edge.target.path
+      }];
+      provenance[edge.target.path] = bindingProvenance;
+      taint[edge.target.path] = secret;
+      bindings.push({
+        edgeId: edge.id,
+        sourceNodeId: edge.source.nodeId,
+        sourcePath: edge.source.path,
+        targetPath: edge.target.path,
+        secret,
+        value: secret ? REDACTED_RUNTIME_VALUE : safeProjectUnknown(runtimeValue.value),
+        provenance: bindingProvenance
+      });
+    });
+
   return {
     item: resolvedItem,
-    preview: createPreview(resolvedItem, taint, provenance),
+    runtimeVariables,
+    preview: createPreview(resolvedItem, runtimeVariables, taint, provenance),
     bindings
   };
 };

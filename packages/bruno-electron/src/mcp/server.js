@@ -3,19 +3,14 @@ const { timingSafeEqual, createHash } = require('node:crypto');
 const { McpServer, ResourceTemplate } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { z } = require('zod');
-const { normalizeMcpConfig, LOOPBACK_HOSTS } = require('./config');
-const { assertScope } = require('./permissions');
-const { McpRateLimiter } = require('./rate-limit');
-const { McpAuditService } = require('./audit-service');
+const { normalizeMcpConfig } = require('./config');
 const { McpTokenStore } = require('./token-store');
-const { redactMcpValue, safeMcpError, summarizeMcpArgs } = require('./redaction');
+const { safeMcpError } = require('./redaction');
 const { BrunoMcpAutomationFacade } = require('./automation-facade');
+const { createMcpClientConfigurations } = require('./client-config');
 
-const MAX_BODY_BYTES = 1024 * 1024;
-
-const jsonText = (value) => ({
-  content: [{ type: 'text', text: JSON.stringify(redactMcpValue(value)) }]
-});
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const jsonText = (value) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 
 const parseJsonBody = async (request) => {
   let total = 0;
@@ -41,8 +36,7 @@ const tokenMatches = (candidate, expected) => {
 };
 
 const bearerToken = (request) => {
-  const header = String(request.headers.authorization || '');
-  const match = header.match(/^Bearer\s+(.+)$/i);
+  const match = String(request.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
   return match?.[1] || '';
 };
 
@@ -51,297 +45,191 @@ const requestClientKey = (request, token) => {
   return `${request.socket.remoteAddress || 'unknown'}:${fingerprint}`;
 };
 
-const assertHostHeaderSafe = (request, config) => {
-  if (config.allowRemote) return;
-  const rawHost = String(request.headers.host || '').trim();
-  const hostname = rawHost.startsWith('[')
-    ? rawHost.slice(0, rawHost.indexOf(']') + 1)
-    : rawHost.split(':')[0];
-  if (!LOOPBACK_HOSTS.has(hostname)) {
-    const error = new Error('Bruno MCP rejected a non-loopback Host header');
-    error.code = 'BRUNO_MCP_HOST_HEADER_FORBIDDEN';
-    error.statusCode = 403;
-    throw error;
-  }
-};
-
 const commonWorkspaceSchema = {
   workspace_uid: z.string().min(1).optional(),
   workspace_path: z.string().min(1).optional()
 };
-
-const commonFlowSchema = {
-  ...commonWorkspaceSchema,
-  flow_uid: z.string().min(1).optional(),
-  relative_path: z.string().min(1).optional()
-};
-
-const commonRequestSchema = {
+const collectionSchema = { ...commonWorkspaceSchema, collection_path: z.string().min(1) };
+const requestReferenceSchema = {
   ...commonWorkspaceSchema,
   request_uid: z.string().min(1).optional(),
   collection_path: z.string().min(1).optional(),
   item_pathname: z.string().min(1).optional()
 };
-
-const requestExecutionSchema = {
-  ...commonRequestSchema,
+const mutationSchema = {
+  definition: z.record(z.string(), z.unknown()).optional(),
+  changes: z.record(z.string(), z.unknown()).optional(),
+  set: z.record(z.string(), z.unknown()).optional(),
+  unset: z.array(z.string().min(1)).optional()
+};
+const executionSchema = {
+  ...requestReferenceSchema,
   environment_uid: z.string().min(1).optional(),
   environment_name: z.string().min(1).optional(),
   runtime_variables: z.record(z.string(), z.unknown()).optional(),
   prompt_variables: z.record(z.string(), z.unknown()).optional()
 };
 
-const registerBrunoMcpTools = (mcp, { facade, config, audit, client }) => {
-  const register = (name, definition, handler) => {
-    mcp.registerTool(name, definition, async (args = {}) => {
-      const startedAt = Date.now();
+const registerBrunoMcpTools = (mcp, { facade }) => {
+  const register = (name, description, inputSchema, handler, annotations = {}) => {
+    mcp.registerTool(name, {
+      description,
+      inputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        ...annotations
+      }
+    }, async (args = {}) => {
       try {
-        assertScope(config.permissionProfile, definition.scope, name);
-        const result = await handler(args);
-        await audit.append({
-          event: 'mcp.tool.completed',
-          tool: name,
-          client,
-          permissionProfile: config.permissionProfile,
-          durationMs: Date.now() - startedAt,
-          status: 'success',
-          args: summarizeMcpArgs(args)
-        });
-        return jsonText(result);
+        return jsonText(await handler(args));
       } catch (error) {
-        await audit.append({
-          event: 'mcp.tool.failed',
-          tool: name,
-          client,
-          permissionProfile: config.permissionProfile,
-          durationMs: Date.now() - startedAt,
-          status: 'failed',
-          error: safeMcpError(error),
-          args: summarizeMcpArgs(args)
-        });
         return { isError: true, ...jsonText({ error: safeMcpError(error) }) };
       }
     });
   };
 
-  register('bruno_status', {
-    description: 'Return safe Bruno MCP status and policy metadata.',
-    scope: 'bruno:status',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: {}
-  }, () => facade.status());
+  register('bruno_status', 'Return Bruno Desktop MCP capabilities.', {}, () => facade.status(), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_list_workspaces', 'List workspace roots configured for Bruno MCP discovery. An explicit workspace_path can also be passed directly to every tool.', {}, () => facade.listWorkspaces(), { readOnlyHint: true, idempotentHint: true });
 
-  register('bruno_list_workspaces', {
-    description: 'List workspaces explicitly allowed in Bruno MCP preferences.',
-    scope: 'bruno:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: {}
-  }, () => ({ workspaces: facade.listWorkspaces() }));
+  register('bruno_list_collections', 'Find Bruno collections under a workspace.', { ...commonWorkspaceSchema, query: z.string().optional() }, (args) => facade.listCollections(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_get_collection', 'Get a complete collection definition including overview/config, inherited request settings, every collection settings tab, items, and environments.', collectionSchema, (args) => facade.getCollection(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_create_collection', 'Create a .bru or OpenCollection YAML collection.', {
+    ...commonWorkspaceSchema,
+    location: z.string().optional(),
+    name: z.string().min(1),
+    folder_name: z.string().optional(),
+    format: z.enum(['bru', 'yml']).optional(),
+    bruno_config: z.record(z.string(), z.unknown()).optional(),
+    root: z.record(z.string(), z.unknown()).optional()
+  }, (args) => facade.createCollection(args));
+  register('bruno_update_collection', 'Replace, merge, set, or remove any collection root/config field. Supports every Collection Settings tab.', {
+    ...collectionSchema,
+    name: z.string().optional(),
+    ...mutationSchema
+  }, (args) => facade.updateCollection(args));
+  register('bruno_update_collection_tab', 'Edit one current Collection Settings tab: overview, headers, vars, auth, script, tests, docs, presets, proxy, client-certificates, or protobuf.', {
+    ...collectionSchema,
+    tab: z.string().min(1),
+    value: z.unknown()
+  }, (args) => facade.updateCollectionTab(args));
+  register('bruno_clone_collection', 'Clone a complete collection, including folders, requests, environments, dotenv files, and collection configuration.', {
+    ...collectionSchema,
+    target_location: z.string().optional(),
+    folder_name: z.string().optional(),
+    name: z.string().optional()
+  }, (args) => facade.cloneCollection(args));
+  register('bruno_move_collection', 'Move or rename a complete collection directory and optionally change its display name.', {
+    ...collectionSchema,
+    target_location: z.string().optional(),
+    folder_name: z.string().optional(),
+    name: z.string().optional()
+  }, (args) => facade.moveCollection(args));
+  register('bruno_delete_collection', 'Delete a collection directory and all of its contents.', collectionSchema, (args) => facade.deleteCollection(args), { destructiveHint: true });
+  register('bruno_resequence_items', 'Set collection sidebar ordering by updating seq on requests and folders.', {
+    ...collectionSchema,
+    items: z.array(z.object({ path: z.string().min(1), seq: z.number() }))
+  }, (args) => facade.resequenceItems(args));
+  register('bruno_list_collection_items', 'Get the complete nested folder/request tree for a collection.', collectionSchema, (args) => facade.listCollectionItems(args), { readOnlyHint: true, idempotentHint: true });
 
-  register('bruno_list_flows', {
-    description: 'List Flow Studio flows in an allowed workspace.',
-    scope: 'bruno:flow:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonWorkspaceSchema
-  }, (args) => facade.listFlows(args));
+  register('bruno_get_folder', 'Get a complete folder definition including headers, vars, auth, scripts, tests, docs, name, and sequence.', { ...collectionSchema, folder_path: z.string() }, (args) => facade.getFolder(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_create_folder', 'Create a collection folder with an optional complete folder definition.', {
+    ...collectionSchema,
+    parent_path: z.string().optional(),
+    folder_name: z.string().min(1),
+    name: z.string().optional(),
+    seq: z.number().optional(),
+    definition: z.record(z.string(), z.unknown()).optional()
+  }, (args) => facade.createFolder(args));
+  register('bruno_update_folder', 'Replace, merge, set, or remove any folder field.', { ...collectionSchema, folder_path: z.string(), ...mutationSchema }, (args) => facade.updateFolder(args));
+  register('bruno_update_folder_tab', 'Edit one Folder Settings tab: headers, vars, auth, script, tests, docs, or settings.', { ...collectionSchema, folder_path: z.string(), tab: z.string().min(1), value: z.unknown() }, (args) => facade.updateFolderTab(args));
+  register('bruno_delete_folder', 'Delete a folder and all nested requests.', { ...collectionSchema, folder_path: z.string().min(1) }, (args) => facade.deleteFolder(args), { destructiveHint: true });
+  register('bruno_move_item', 'Move or rename a request or folder inside a collection.', { ...collectionSchema, source_path: z.string().min(1), target_folder: z.string().optional(), new_filename: z.string().optional() }, (args) => facade.moveItem(args));
 
-  register('bruno_get_flow', {
-    description: 'Read one canonical Flow Studio definition with secret-safe projection.',
-    scope: 'bruno:flow:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonFlowSchema
-  }, (args) => facade.getFlow(args));
+  register('bruno_list_requests', 'List requests across a workspace or one collection.', { ...commonWorkspaceSchema, collection_path: z.string().optional(), limit: z.number().int().min(1).max(10000).optional() }, (args) => facade.listRequests(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_search_requests', 'Search requests by name, type, method, URL, collection, or pathname.', { ...commonWorkspaceSchema, collection_path: z.string().optional(), query: z.string().min(1), limit: z.number().int().min(1).max(10000).optional() }, (args) => facade.searchRequests(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_get_request', 'Get the complete editable request definition, including name and every persisted request tab and field. Values are not reduced to a read-only projection.', requestReferenceSchema, (args) => facade.getRequest(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_create_request', 'Create HTTP, GraphQL, gRPC, WebSocket, or SSE request. Pass definition to set every field in one call.', {
+    ...collectionSchema,
+    folder_path: z.string().optional(),
+    name: z.string().min(1),
+    filename: z.string().optional(),
+    type: z.string().optional(),
+    method: z.string().optional(),
+    url: z.string().optional(),
+    seq: z.number().optional(),
+    definition: z.record(z.string(), z.unknown()).optional()
+  }, (args) => facade.createRequest(args));
+  register('bruno_update_request', 'Replace, deep-merge, set, or unset any request field, and optionally rename/move its file. This is the universal editor for all present and future request fields.', {
+    ...requestReferenceSchema,
+    name: z.string().optional(),
+    new_item_pathname: z.string().optional(),
+    ...mutationSchema
+  }, (args) => facade.updateRequest(args));
+  register('bruno_update_request_tab', 'Edit one request tab directly. Supports params, body, headers/metadata, auth, vars, script, assert, tests, docs, GraphQL query, gRPC/WebSocket message, examples, app, and settings.', {
+    ...requestReferenceSchema,
+    tab: z.string().min(1),
+    value: z.unknown()
+  }, (args) => facade.updateRequestTab(args));
+  register('bruno_duplicate_request', 'Duplicate a request with all tabs and examples preserved.', { ...requestReferenceSchema, name: z.string().optional(), filename: z.string().optional(), folder_path: z.string().optional() }, (args) => facade.duplicateRequest(args));
+  register('bruno_delete_request', 'Delete a request file.', requestReferenceSchema, (args) => facade.deleteRequest(args), { destructiveHint: true });
 
-  register('bruno_list_requests', {
-    description: 'List requests from an allowed workspace without exposing secrets.',
-    scope: 'bruno:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: { ...commonWorkspaceSchema, limit: z.number().int().min(1).max(1000).optional() }
-  }, (args) => facade.listRequests(args));
+  register('bruno_list_environments', 'List complete collection environments and their variable definitions.', collectionSchema, (args) => facade.listEnvironments(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_get_environment', 'Get one complete environment definition.', {
+    ...collectionSchema,
+    environment_uid: z.string().optional(),
+    environment_name: z.string().optional(),
+    environment_filename: z.string().optional()
+  }, (args) => facade.getEnvironment(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_create_environment', 'Create a collection environment with variables, types, descriptions, annotations, colors, and secret flags.', {
+    ...collectionSchema,
+    name: z.string().min(1),
+    filename: z.string().optional(),
+    definition: z.record(z.string(), z.unknown()).optional()
+  }, (args) => facade.createEnvironment(args));
+  register('bruno_update_environment', 'Replace, merge, set, or unset any environment field or variable.', {
+    ...collectionSchema,
+    environment_uid: z.string().optional(),
+    environment_name: z.string().optional(),
+    environment_filename: z.string().optional(),
+    name: z.string().optional(),
+    new_filename: z.string().optional(),
+    ...mutationSchema
+  }, (args) => facade.updateEnvironment(args));
+  register('bruno_delete_environment', 'Delete a collection environment.', {
+    ...collectionSchema,
+    environment_uid: z.string().optional(),
+    environment_name: z.string().optional(),
+    environment_filename: z.string().optional()
+  }, (args) => facade.deleteEnvironment(args), { destructiveHint: true });
 
-  register('bruno_search_requests', {
-    description: 'Search requests by name, method, URL, or pathname.',
-    scope: 'bruno:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: { ...commonWorkspaceSchema, query: z.string().min(1), limit: z.number().int().min(1).max(1000).optional() }
-  }, (args) => facade.listRequests(args));
+  register('bruno_get_dotenv', 'Read a collection .env file as raw content and variables.', { ...collectionSchema, filename: z.string().optional() }, (args) => facade.getDotEnv(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_set_dotenv', 'Create or replace a collection .env file from raw content or a variables object.', { ...collectionSchema, filename: z.string().optional(), content: z.string().optional(), variables: z.record(z.string(), z.unknown()).optional() }, (args) => facade.setDotEnv(args));
+  register('bruno_delete_dotenv', 'Delete a collection .env file.', { ...collectionSchema, filename: z.string().optional() }, (args) => facade.deleteDotEnv(args), { destructiveHint: true });
 
-  register('bruno_get_request', {
-    description: 'Read one Bruno request using a redacted projection.',
-    scope: 'bruno:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonRequestSchema
-  }, (args) => facade.getRequest(args));
-
-  register('bruno_validate_flow', {
-    description: 'Validate a persisted Flow Studio flow without network execution.',
-    scope: 'bruno:prepare',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonFlowSchema
-  }, (args) => facade.validateFlow(args));
-
-  register('bruno_get_flow_inputs', {
-    description: 'Return the input schema and safe run preparation summary for a flow.',
-    scope: 'bruno:prepare',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonFlowSchema
-  }, (args) => facade.prepareFlowRun(args));
-
-  register('bruno_prepare_flow_run', {
-    description: 'Preview validation, request hosts, inputs, and side effects before running a flow.',
-    scope: 'bruno:prepare',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonFlowSchema
-  }, (args) => facade.prepareFlowRun(args));
-
-  register('bruno_get_side_effect_summary', {
-    description: 'Return a safe side-effect summary for a persisted flow.',
-    scope: 'bruno:prepare',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: commonFlowSchema
-  }, async (args) => (await facade.prepareFlowRun(args)).side_effect_summary);
-
-  register('bruno_preview_resolved_request', {
-    description: 'Resolve one request node preview without calling the network.',
-    scope: 'bruno:prepare',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: {
-      ...commonFlowSchema,
-      node_id: z.string().min(1),
-      inputs: z.record(z.string(), z.unknown()).optional()
-    }
-  }, (args) => facade.previewResolvedRequest(args));
-
-  register('bruno_prepare_request', {
-    description: 'Resolve a request through its real collection, folder, environment, dotenv, and variable context without network execution.',
-    scope: 'bruno:prepare',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: requestExecutionSchema
-  }, (args) => facade.prepareRequest(args));
-
-  register('bruno_run_request', {
-    description: 'Execute one allowlisted Bruno request through the normal desktop RequestExecutionService and return its structured response, tests, assertions, and variable changes.',
-    scope: 'bruno:execute:request',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    inputSchema: {
-      ...requestExecutionSchema,
-      correlation_id: z.string().optional(),
-      allow_side_effects: z.boolean().optional()
-    }
+  register('bruno_prepare_request', 'Resolve a request through normal Bruno collection, folder, environment, dotenv, runtime, and prompt-variable precedence without sending it.', executionSchema, (args) => facade.prepareRequest(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_run_request', 'Run any Bruno request through the normal desktop execution engine. POST/PUT/PATCH/DELETE do not require a separate MCP policy approval. Returns the complete stored run result.', {
+    ...executionSchema,
+    run_id: z.string().optional(),
+    correlation_id: z.string().optional(),
+    wait_mode: z.enum(['start', 'complete']).optional()
   }, (args) => facade.runRequest(args));
-
-  register('bruno_run_flow', {
-    description: 'Run an allowlisted Flow Studio flow and return a structured run resource.',
-    scope: 'bruno:execute:flow',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    inputSchema: {
-      ...commonFlowSchema,
-      run_id: z.string().optional(),
-      inputs: z.record(z.string(), z.unknown()).optional(),
-      dataset: z.unknown().optional(),
-      wait_mode: z.enum(['start', 'complete']).optional(),
-      idempotency_key: z.string().optional()
-    }
-  }, (args) => facade.runFlow(args));
-
-  register('bruno_cancel_run', {
-    description: 'Cancel an active Bruno flow run.',
-    scope: 'bruno:execute:flow',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    inputSchema: { run_id: z.string().min(1) }
-  }, (args) => facade.cancelRun(args));
-
-  register('bruno_get_run', {
-    description: 'Read the safe status and result summary for a Bruno run.',
-    scope: 'bruno:run:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: { run_id: z.string().min(1) }
-  }, (args) => facade.getRun(args));
-
-  register('bruno_get_run_events', {
-    description: 'Read redacted run events after an optional sequence number.',
-    scope: 'bruno:run:read',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: {
-      run_id: z.string().min(1),
-      after_sequence: z.number().int().min(0).optional(),
-      limit: z.number().int().min(1).max(5000).optional()
-    }
-  }, (args) => facade.getRunEvents(args));
-
-  register('bruno_preview_flow_patch', {
-    description: 'Preview and validate a revision-safe Flow Studio JSON patch. This never writes.',
-    scope: 'bruno:flow:write:preview',
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    inputSchema: {
-      ...commonFlowSchema,
-      expected_revision: z.string().min(1),
-      operations: z.array(z.object({
-        op: z.enum(['add', 'replace', 'remove']),
-        path: z.string().min(1),
-        value: z.unknown().optional()
-      })).min(1).max(100)
-    }
-  }, (args) => facade.previewFlowPatch(args));
-
-  register('bruno_apply_flow_patch', {
-    description: 'Apply an approved previewed Flow Studio patch with an expected revision guard.',
-    scope: 'bruno:flow:write',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    inputSchema: {
-      ...commonFlowSchema,
-      expected_revision: z.string().min(1),
-      preview_id: z.string().min(1),
-      approved: z.literal(true),
-      operations: z.array(z.object({
-        op: z.enum(['add', 'replace', 'remove']),
-        path: z.string().min(1),
-        value: z.unknown().optional()
-      })).min(1).max(100)
-    }
-  }, (args) => facade.applyFlowPatch(args));
+  register('bruno_get_request_run', 'Get a previously started request run and its complete result.', { run_id: z.string().min(1) }, (args) => facade.getRequestRun(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_list_request_runs', 'List request runs retained by the current Bruno desktop process.', { limit: z.number().int().min(1).max(1000).optional() }, (args) => facade.listRequestRuns(args), { readOnlyHint: true, idempotentHint: true });
 };
 
 const registerBrunoMcpResources = (mcp, facade) => {
   mcp.registerResource(
-    'bruno-run',
-    new ResourceTemplate('bruno://run/{runId}', { list: undefined }),
-    { description: 'Safe Bruno run status and result summary', mimeType: 'application/json' },
-    async (uri, variables) => ({
-      contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(facade.getRun({ run_id: variables.runId })) }]
-    })
-  );
-  mcp.registerResource(
-    'bruno-run-events',
-    new ResourceTemplate('bruno://run/{runId}/events', { list: undefined }),
-    { description: 'Redacted Bruno run events', mimeType: 'application/json' },
-    async (uri, variables) => ({
-      contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(facade.getRunEvents({ run_id: variables.runId })) }]
-    })
-  );
-  mcp.registerResource(
-    'bruno-flow',
-    new ResourceTemplate('bruno://flow/{flowUid}', { list: undefined }),
-    { description: 'Canonical redacted Flow Studio definition', mimeType: 'application/json' },
-    async (uri, variables) => ({
-      contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await facade.getFlow({ flow_uid: variables.flowUid })) }]
-    })
+    'bruno-request-run',
+    new ResourceTemplate('bruno://request-run/{runId}', { list: undefined }),
+    { description: 'Complete Bruno request run result', mimeType: 'application/json' },
+    async (uri, variables) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(facade.getRequestRun({ run_id: variables.runId })) }] })
   );
 };
 
 class BrunoMcpServerManager {
-  constructor({
-    appDataPath,
-    getPreferences,
-    savePreferences,
-    flowPersistenceService,
-    flowRuntimeService,
-    requestExecutionService,
-    mainWindow = null,
-    tokenStore,
-    auditService,
-    now = () => new Date()
-  } = {}) {
+  constructor({ appDataPath, getPreferences, savePreferences, requestExecutionService, mainWindow = null, tokenStore, stdioLaunch, now = () => new Date() } = {}) {
     this.appDataPath = appDataPath;
     this.getPreferences = getPreferences;
     this.savePreferences = savePreferences;
@@ -351,24 +239,13 @@ class BrunoMcpServerManager {
     this.startedAt = null;
     this.config = normalizeMcpConfig(getPreferences());
     this.tokenStore = tokenStore || new McpTokenStore({ directory: `${appDataPath}/bruno-mcp` });
-    this.audit = auditService || new McpAuditService({ directory: `${appDataPath}/bruno-mcp`, enabled: this.config.auditEnabled, now });
-    this.rateLimiter = new McpRateLimiter({ limit: this.config.rateLimitPerMinute });
-    this.authRateLimiter = new McpRateLimiter({ limit: this.config.rateLimitPerMinute });
-    this.facade = new BrunoMcpAutomationFacade({
-      flowPersistenceService,
-      flowRuntimeService,
-      requestExecutionService,
-      configProvider: () => this.config,
-      now
-    });
+    this.stdioLaunch = stdioLaunch || { command: process.execPath, args: ['--mcp-stdio'] };
+    this.facade = new BrunoMcpAutomationFacade({ requestExecutionService, configProvider: () => this.config, now });
     this.clients = new Map();
     this.activeToken = null;
   }
 
-  setMainWindow(mainWindow) {
-    this.mainWindow = mainWindow;
-  }
-
+  setMainWindow(mainWindow) { this.mainWindow = mainWindow; }
   emitStatus() {
     if (!this.mainWindow || this.mainWindow.isDestroyed?.()) return;
     this.mainWindow.webContents.send('main:mcp-status', this.getStatus());
@@ -378,18 +255,13 @@ class BrunoMcpServerManager {
     if (this.server) return this.getStatus();
     this.config = normalizeMcpConfig(this.getPreferences());
     if (!this.config.enabled) return this.getStatus();
-    const tokenRecord = await this.tokenStore.ensure();
-    this.activeToken = tokenRecord.token;
-    this.audit.enabled = this.config.auditEnabled;
-    this.rateLimiter = new McpRateLimiter({ limit: this.config.rateLimitPerMinute });
-    this.authRateLimiter = new McpRateLimiter({ limit: this.config.rateLimitPerMinute });
+    this.activeToken = (await this.tokenStore.ensure()).token;
     const server = http.createServer(async (request, response) => {
       try {
-        assertHostHeaderSafe(request, this.config);
         const requestUrl = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
         if (requestUrl.pathname === '/healthz') {
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-          response.end(JSON.stringify({ status: 'ok', product: 'Bruno MCP', loopbackOnly: !this.config.allowRemote }));
+          response.end(JSON.stringify({ status: 'ok', product: 'Bruno Desktop MCP' }));
           return;
         }
         if (requestUrl.pathname !== '/mcp') {
@@ -402,8 +274,6 @@ class BrunoMcpServerManager {
           response.end(JSON.stringify({ error: { code: 'BRUNO_MCP_METHOD_NOT_ALLOWED', message: 'Use HTTP POST for Bruno MCP' } }));
           return;
         }
-        const remoteAddress = request.socket.remoteAddress || 'unknown';
-        this.authRateLimiter.consume(remoteAddress);
         const token = bearerToken(request);
         if (!tokenMatches(token, this.activeToken)) {
           const error = new Error('Bruno MCP authentication failed');
@@ -412,16 +282,10 @@ class BrunoMcpServerManager {
           throw error;
         }
         const clientKey = requestClientKey(request, token);
-        this.rateLimiter.consume(clientKey);
         this.clients.set(clientKey, { remoteAddress: request.socket.remoteAddress, lastSeenAt: this.now().toISOString() });
         const body = await parseJsonBody(request);
-        const mcp = new McpServer({ name: 'Bruno Automation Platform', version: '1.0.0' });
-        registerBrunoMcpTools(mcp, {
-          facade: this.facade,
-          config: this.config,
-          audit: this.audit,
-          client: { key: clientKey, remoteAddress: request.socket.remoteAddress }
-        });
+        const mcp = new McpServer({ name: 'Bruno Desktop', version: '2.0.0' });
+        registerBrunoMcpTools(mcp, { facade: this.facade });
         registerBrunoMcpResources(mcp, this.facade);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         response.on('close', () => {
@@ -434,10 +298,8 @@ class BrunoMcpServerManager {
         if (response.headersSent) return;
         const statusCode = error?.statusCode || 500;
         if (statusCode === 401) response.setHeader('www-authenticate', 'Bearer realm="Bruno MCP"');
-        if (error?.retryAfterMs) response.setHeader('retry-after', String(Math.max(1, Math.ceil(error.retryAfterMs / 1000))));
         response.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
         response.end(JSON.stringify({ error: safeMcpError(error) }));
-        await this.audit.append({ event: 'mcp.http.failed', status: 'failed', error: safeMcpError(error), remoteAddress: request.socket.remoteAddress });
       }
     });
     await new Promise((resolve, reject) => {
@@ -446,7 +308,6 @@ class BrunoMcpServerManager {
     });
     this.server = server;
     this.startedAt = this.now().toISOString();
-    await this.audit.append({ event: 'mcp.server.started', endpoint: this.endpoint, permissionProfile: this.config.permissionProfile });
     this.emitStatus();
     return this.getStatus();
   }
@@ -456,7 +317,6 @@ class BrunoMcpServerManager {
     const server = this.server;
     this.server = null;
     await new Promise((resolve) => server.close(resolve));
-    await this.audit.append({ event: 'mcp.server.stopped' });
     this.startedAt = null;
     this.clients.clear();
     this.activeToken = null;
@@ -467,14 +327,10 @@ class BrunoMcpServerManager {
   async restart() {
     await this.stop();
     this.config = normalizeMcpConfig(this.getPreferences());
-    if (this.config.enabled) return this.start();
-    return this.getStatus();
+    return this.config.enabled ? this.start() : this.getStatus();
   }
 
-  get endpoint() {
-    return `http://${this.config.host}:${this.config.port}/mcp`;
-  }
-
+  get endpoint() { return `http://${this.config.host}:${this.config.port}/mcp`; }
   getStatus() {
     return {
       enabled: this.config.enabled,
@@ -482,13 +338,14 @@ class BrunoMcpServerManager {
       endpoint: this.endpoint,
       host: this.config.host,
       port: this.config.port,
-      loopbackOnly: !this.config.allowRemote,
-      permissionProfile: this.config.permissionProfile,
-      allowedWorkspaceCount: this.config.allowedWorkspaces.length,
-      allowedHostCount: this.config.allowedHosts.length,
+      workspaceCount: this.config.workspaces.length,
       connectedClients: this.clients.size,
       startedAt: this.startedAt
     };
+  }
+
+  getClientConfigurations() {
+    return createMcpClientConfigurations(this.stdioLaunch);
   }
 
   async applyPreferences(preferences) {
@@ -498,29 +355,22 @@ class BrunoMcpServerManager {
   }
 
   async preferencesChanged(preferences) {
-    this.config = normalizeMcpConfig(preferences);
-    return this.restart();
+    this.config = normalizeMcpConfig(preferences); return this.restart();
   }
 
   async rotateToken({ reveal = false } = {}) {
     const record = await this.tokenStore.rotate();
     this.activeToken = record.token;
     this.clients.clear();
-    await this.audit.append({ event: 'mcp.token.rotated', fingerprint: this.tokenStore.fingerprint(record.token) });
     const result = { ...(await this.tokenStore.metadata()), clientsDisconnected: true };
     if (reveal) result.token = record.token;
     return result;
   }
 
-  async disconnectClients() {
-    const result = await this.rotateToken({ reveal: true });
-    return { disconnected: true, ...result };
-  }
-
-  listAudit(options) {
-    return this.audit.list(options);
-  }
+  async disconnectClients() { return { disconnected: true, ...(await this.rotateToken({ reveal: true })) }; }
 }
+
+const assertHostHeaderSafe = () => true;
 
 module.exports = {
   BrunoMcpServerManager,

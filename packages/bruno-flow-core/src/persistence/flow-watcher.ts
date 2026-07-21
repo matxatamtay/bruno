@@ -27,6 +27,8 @@ const toEntry = (
     revision: parsed.flow.revision,
     updatedAt: parsed.flow.metadata.updatedAt,
     tags: parsed.flow.metadata.tags || [],
+    inputSchema: parsed.flow.inputSchema,
+    outputSchema: parsed.flow.outputSchema,
     status: 'valid'
   };
 };

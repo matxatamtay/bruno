@@ -1,5 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
+const cloneDeep = require('lodash/cloneDeep');
 const { parseRequest } = require('@usebruno/filestore');
 const {
   DeterministicFlowScheduler,
@@ -14,7 +15,10 @@ const {
 } = require('@usebruno/flow-core');
 const { uuid } = require('../utils/common');
 const { getCollectionFormat } = require('../utils/filesystem');
-const { hydrateRequestWithUuid } = require('../utils/collection');
+const { getEnvVars, hydrateRequestWithUuid } = require('../utils/collection');
+const { getProcessEnvVars } = require('../store/process-env');
+const { prepareRequest } = require('../ipc/network/prepare-request');
+const interpolateVars = require('../ipc/network/interpolate-vars');
 const { getRequestUid } = require('../cache/requestUids');
 const { FlowCheckpointStore } = require('./flow-checkpoint-store');
 
@@ -37,7 +41,94 @@ const pathMatches = (candidate, expected) => {
 };
 
 const isRequestNode = (node) => ['http', 'graphql', 'websocket', 'grpc-unary', 'sse'].includes(node?.kind);
-const isInputNode = (node) => ['static-input', 'form-input', 'environment-input', 'dataset-input', 'secret-reference'].includes(node?.kind);
+const isInputNode = (node) => ['static-input', 'form-input', 'environment-input', 'dataset-input', 'dynamic-data', 'secret-reference'].includes(node?.kind);
+const SENSITIVE_KEY_PATTERN = /(^|[-_.])(authorization|cookie|password|secret|token|api[-_.]?key)([-_.]|$)/i;
+const REDACTED = '[REDACTED]';
+
+const secretValuesForPreview = ({ collection, environment, runtimeVariables }) => {
+  const values = new Set();
+  const add = (value) => {
+    if (value === undefined || value === null || value === '') return;
+    values.add(String(value));
+  };
+  (environment?.variables || []).forEach((variable) => {
+    if (variable?.secret || SENSITIVE_KEY_PATTERN.test(String(variable?.name || ''))) add(variable.value);
+  });
+  const globalSecrets = new Set(collection?.globalEnvSecrets || []);
+  Object.entries(collection?.globalEnvironmentVariables || {}).forEach(([name, value]) => {
+    if (globalSecrets.has(name) || SENSITIVE_KEY_PATTERN.test(name)) add(value);
+  });
+  Object.entries(runtimeVariables || {}).forEach(([name, value]) => {
+    if (SENSITIVE_KEY_PATTERN.test(name)) add(value);
+  });
+  return values;
+};
+
+const redactResolvedValue = (value, secretValues, key = '') => {
+  if (SENSITIVE_KEY_PATTERN.test(key)) return REDACTED;
+  if (typeof value === 'string') {
+    let next = value;
+    secretValues.forEach((secret) => {
+      if (secret) next = next.split(secret).join(REDACTED);
+    });
+    return next;
+  }
+  if (Buffer.isBuffer(value)) return `<binary ${value.length} bytes>`;
+  if (Array.isArray(value)) return value.map((entry) => redactResolvedValue(entry, secretValues));
+  if (value && typeof value === 'object') {
+    if (typeof value.pipe === 'function') return '<streaming body>';
+    return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactResolvedValue(entryValue, secretValues, entryKey)
+    ]));
+  }
+  return value;
+};
+
+const parsePreparedBody = (value) => {
+  if (typeof value !== 'string') return value ?? null;
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  try {
+    return JSON.parse(trimmed);
+  } catch (_) {
+    return value;
+  }
+};
+
+const createEnvironmentResolvedPreview = async ({ asset, resolved }) => {
+  const collection = cloneDeep(asset.collection || {});
+  const item = cloneDeep(resolved.item);
+  const environment = asset.environmentContext
+    || (collection.environments || []).find((candidate) => candidate.uid === collection.activeEnvironmentUid)
+    || null;
+  const runtimeVariables = {
+    ...(asset.runtimeVariables || collection.runtimeVariables || {}),
+    ...(resolved.runtimeVariables || {})
+  };
+  collection.runtimeVariables = runtimeVariables;
+  const prepared = await prepareRequest(item, collection);
+  interpolateVars(
+    prepared,
+    getEnvVars(environment || {}),
+    runtimeVariables,
+    getProcessEnvVars(collection.uid),
+    collection.promptVariables || {}
+  );
+  const secretValues = secretValuesForPreview({ collection, environment, runtimeVariables });
+  return {
+    ...resolved.preview,
+    method: prepared.method || resolved.preview.method,
+    url: redactResolvedValue(prepared.url || resolved.preview.url, secretValues, 'url'),
+    pathParams: redactResolvedValue(resolved.preview.pathParams || {}, secretValues, 'pathParams'),
+    query: redactResolvedValue(prepared.params || resolved.preview.query || {}, secretValues, 'query'),
+    headers: redactResolvedValue(prepared.headers || resolved.preview.headers || {}, secretValues, 'headers'),
+    body: redactResolvedValue(parsePreparedBody(prepared.data), secretValues, 'body'),
+    runtimeVariables: redactResolvedValue(runtimeVariables, secretValues, 'runtimeVariables'),
+    environment: environment ? { uid: environment.uid, name: environment.name } : null,
+    unresolvedVariables: [...JSON.stringify(prepared).matchAll(/{{\s*([^{}]+?)\s*}}/g)].map((match) => match[1])
+  };
+};
 
 const findCatalogAsset = (requestCatalog = [], node) => {
   const requestRef = node?.requestRef;
@@ -88,13 +179,22 @@ const loadRequestAssetFromDisk = async (asset, node, payload) => {
     throw new Error(`Request symlink escapes collection for node ${node.id}`);
   }
   const content = await fs.readFile(realItemPath, 'utf8');
-  const item = await parseRequest(content, { format: getCollectionFormat(collectionPath) });
-  item.raw = content;
+  const diskItem = await parseRequest(content, { format: getCollectionFormat(collectionPath) });
+  diskItem.raw = content;
+  diskItem.pathname = itemPath;
+  diskItem.uid = getRequestUid(itemPath);
+  diskItem.name = diskItem.name || asset.item?.name || path.basename(itemPath, path.extname(itemPath));
+  diskItem.type = diskItem.type || 'http-request';
+  hydrateRequestWithUuid(diskItem, itemPath);
+
+  // The file is still the trust anchor for identity and path confinement, while the
+  // renderer item carries the same unsaved draft a normal Bruno Send action would use.
+  const item = asset.item ? cloneDeep(asset.item) : diskItem;
   item.pathname = itemPath;
-  item.uid = getRequestUid(itemPath);
-  item.name = item.name || asset.item?.name || path.basename(itemPath, path.extname(itemPath));
-  item.type = item.type || 'http-request';
-  hydrateRequestWithUuid(item, itemPath);
+  item.uid = item.uid || diskItem.uid;
+  item.name = item.name || diskItem.name;
+  item.type = item.type || diskItem.type;
+  item.raw = diskItem.raw;
   flowDebug('request-asset:disk-load:completed', {
     runId: payload.runId,
     nodeId: node.id,
@@ -192,7 +292,7 @@ class FlowRuntimeService {
           throw error;
         }
       },
-      executeRequest: async ({ node, asset, item, signal, runId }) => {
+      executeRequest: async ({ node, asset, item, runtimeVariables, signal, runId }) => {
         flowDebug('request:execute:start', {
           runId,
           nodeId: node.id,
@@ -205,14 +305,17 @@ class FlowRuntimeService {
         });
         try {
           const execution = await this.requestExecutionService.executeWithLegacy({
-            workspaceContext: {
+            workspaceContext: payload.workspaceContext || {
               uid: payload.flow.workspace?.uid,
               pathname: payload.workspacePath
             },
             collection: asset.collection,
             item,
             environmentContext: asset.environmentContext || payload.environmentContext,
-            runtimeVariables: asset.runtimeVariables || payload.runtimeVariables,
+            runtimeVariables: {
+              ...(asset.runtimeVariables || payload.runtimeVariables || {}),
+              ...(runtimeVariables || {})
+            },
             signal,
             executionContext: {
               source: 'flow-runtime',
@@ -316,7 +419,7 @@ class FlowRuntimeService {
       checkpointId: normalizedPayload.checkpointId
     });
     return this.executeRun({
-      ...normalizedPayload,
+      ...payload,
       runId: normalizedPayload.runId || this.idFactory()
     }, checkpoint);
   }
@@ -390,9 +493,18 @@ class FlowRuntimeService {
     flow.dataEdges.filter((edge) => edge.target.nodeId === nodeId).forEach((edge) => resolveDataNode(edge.source.nodeId));
     const asset = await this.loadRequestAsset(findCatalogAsset(payload.requestCatalog, node), node, payload);
     const resolved = resolveRequestBindings({ flow, node, item: asset.item, outputs });
+    let preview = resolved.preview;
+    try {
+      preview = await createEnvironmentResolvedPreview({ asset, resolved });
+    } catch (error) {
+      flowDebug('request-preview:environment-resolution-fallback', {
+        nodeId,
+        error: debugError(error)
+      });
+    }
     return {
       nodeId,
-      preview: resolved.preview,
+      preview,
       bindings: resolved.bindings
     };
   }

@@ -15,7 +15,7 @@ const SINGLETON_TAB_TYPES = new Set([
   'preferences',
   'workspaceOverview',
   'workspaceEnvironments',
-  'workspaceFlowStudio',
+  'flow-studio',
   'openapi-sync',
   'openapi-spec',
   'git-review',
@@ -31,13 +31,13 @@ const NON_REPLACEABLE_SINGLETON_TAB_TYPES = new Set([
 
 const IGNORED_TAB_TYPES = new Set([
   'v4-migration',
-  'changelog'
+  'changelog',
+  'workspaceFlowStudio'
 ]);
 
 export const WORKSPACE_TAB_UID_SUFFIX_BY_TYPE = {
   workspaceOverview: 'overview',
-  workspaceEnvironments: 'environments',
-  workspaceFlowStudio: 'flows'
+  workspaceEnvironments: 'environments'
 };
 
 export const WORKSPACE_TAB_TYPES = new Set(Object.keys(WORKSPACE_TAB_UID_SUFFIX_BY_TYPE));
@@ -628,7 +628,8 @@ export const deserializeTab = (snapshotTab, collection) => {
     || type === 'environment-settings'
     || type === 'global-environment-settings'
     || type === 'git-review'
-    || type === 'web-recorder';
+    || type === 'web-recorder'
+    || type === 'flow-studio';
 
   const needsTypeBasedFallback = accessor === 'type' || (accessor === 'pathname' && !pathname && isCollectionScopedSingleton);
 
@@ -663,6 +664,8 @@ export const deserializeTab = (snapshotTab, collection) => {
       tab.uid = `${collection.uid}-git-review`;
     } else if (type === 'web-recorder') {
       tab.uid = `${collection.uid}-web-recorder`;
+    } else if (type === 'flow-studio') {
+      tab.uid = `${collection.uid}-flow-studio`;
     } else if (type === 'preferences') {
       tab.uid = `${collection.uid}-preferences`;
     } else if (type === 'environment-settings') {

@@ -17,13 +17,13 @@ const createFlow = () => ({
   nodes: [
     { id: 'start', semanticKey: 'start', kind: 'start', position: { x: 0, y: 0 }, config: {} },
     {
-      id: 'env_secret', semanticKey: 'auth_token', kind: 'environment-input', position: { x: 0, y: 150 },
-      config: { variable: 'AUTH_TOKEN', outputPath: 'value' }
+      id: 'mapped_user', semanticKey: 'mapped_user', kind: 'static-input', position: { x: 0, y: 150 },
+      config: { value: 'user-7', outputPath: 'value' }
     },
     {
       id: 'request_one', semanticKey: 'request_one', kind: 'http', position: { x: 200, y: 0 },
       requestRef: {
-        collectionPath: 'collections/api', itemPathname: 'one.bru', expectedItemUid: 'request_one', expectedMethod: 'POST'
+        collectionPath: '.', itemPathname: 'one.bru', expectedItemUid: 'request_one', expectedMethod: 'POST'
       },
       config: {}
     },
@@ -35,8 +35,8 @@ const createFlow = () => ({
   ],
   dataEdges: [
     {
-      id: 'data_auth', source: { nodeId: 'env_secret', path: 'value' },
-      target: { nodeId: 'request_one', path: 'request.header.Authorization' }, required: true
+      id: 'data_user_id', source: { nodeId: 'mapped_user', path: 'value' },
+      target: { nodeId: 'request_one', path: 'runtime.userId' }, required: true
     }
   ],
   frames: [],
@@ -44,16 +44,29 @@ const createFlow = () => ({
 });
 
 const createCatalog = () => [{
-  collectionPath: 'collections/api',
+  collectionPath: '.',
   itemPathname: 'one.bru',
-  collection: { uid: 'collection_api', pathname: '/workspace/collections/api', items: [] },
+  collection: {
+    uid: 'collection_api',
+    pathname: '/workspace/collections/api',
+    activeEnvironmentUid: 'env_local',
+    runtimeVariables: { baseUrl: 'https://api.test', existing: 'collection-value' },
+    items: []
+  },
+  environmentContext: { uid: 'env_local', name: 'Local', variables: [] },
+  runtimeVariables: { baseUrl: 'https://api.test', existing: 'collection-value' },
   item: {
     uid: 'request_one', name: 'Request one', type: 'http-request', pathname: '/workspace/collections/api/one.bru',
-    request: { method: 'POST', url: 'https://api.test/one', params: [], headers: [], body: { mode: 'json', json: '{}' } }
+    request: {
+      method: 'POST',
+      url: '{{baseUrl}}/users/{{userId}}',
+      params: [],
+      headers: [{ name: 'Authorization', value: '{{AUTH_TOKEN}}', enabled: true }],
+      body: { mode: 'json', json: '{"userId":"{{userId}}"}' },
+      auth: { mode: 'none' }
+    }
   }
 }];
-
-const headerValue = (item, name) => item.request.headers.find((header) => header.name === name)?.value;
 
 describe('FlowRuntimeService', () => {
   let tempRoot;
@@ -86,8 +99,14 @@ describe('FlowRuntimeService', () => {
     const asset = createCatalog()[0];
     asset.collection.pathname = collectionPath;
 
-    const loaded = await loadRequestAssetFromDisk(asset, node, { workspacePath });
-    expect(loaded.item.request).toMatchObject({ method: 'POST', url: 'https://disk.example.test/users' });
+    asset.item.draft = {
+      request: {
+        ...asset.item.request,
+        url: '{{baseUrl}}/draft/{{userId}}'
+      }
+    };
+    const loaded = await loadRequestAssetFromDisk(asset, node, { workspacePath: collectionPath });
+    expect(loaded.item.draft.request).toMatchObject({ method: 'POST', url: '{{baseUrl}}/draft/{{userId}}' });
     expect(loaded.item.pathname).toBe(path.join(collectionPath, 'one.bru'));
 
     const outsidePath = path.join(tempRoot, 'outside.bru');
@@ -95,16 +114,16 @@ describe('FlowRuntimeService', () => {
     fs.unlinkSync(path.join(collectionPath, 'one.bru'));
     fs.symlinkSync(outsidePath, path.join(collectionPath, 'one.bru'));
 
-    await expect(loadRequestAssetFromDisk(asset, node, { workspacePath })).rejects.toThrow('symlink escapes collection');
+    await expect(loadRequestAssetFromDisk(asset, node, { workspacePath: collectionPath })).rejects.toThrow('symlink escapes collection');
   });
 
   it('delegates flow requests to RequestExecutionService and emits only safe projections', async () => {
     const sent = [];
-    const executedItems = [];
+    const executions = [];
     let id = 0;
     const requestExecutionService = {
-      executeWithLegacy: jest.fn(async ({ item, executionContext }) => {
-        executedItems.push(item);
+      executeWithLegacy: jest.fn(async ({ item, collection, environmentContext, runtimeVariables, workspaceContext, executionContext }) => {
+        executions.push({ item, collection, environmentContext, runtimeVariables, workspaceContext });
         expect(executionContext).toMatchObject({ source: 'flow-runtime', flowUid: 'flow_runtime_service', nodeId: 'request_one' });
         return {
           result: {
@@ -132,18 +151,31 @@ describe('FlowRuntimeService', () => {
     const result = await service.run({
       runId: 'run_service',
       flow: createFlow(),
-      workspacePath: '/workspace',
-      requestCatalog: createCatalog(),
-      environmentValues: { AUTH_TOKEN: { value: 'Bearer electron-secret', secret: true } }
+      workspacePath: '/workspace/collections/api',
+      workspaceContext: { uid: 'workspace_local', pathname: '/workspace' },
+      requestCatalog: createCatalog()
     });
 
     expect(result.status).toBe('success');
     expect(requestExecutionService.executeWithLegacy).toHaveBeenCalledTimes(1);
-    expect(headerValue(executedItems[0], 'Authorization')).toBe('Bearer electron-secret');
+    expect(executions[0]).toMatchObject({
+      collection: { uid: 'collection_api', activeEnvironmentUid: 'env_local' },
+      environmentContext: { uid: 'env_local', name: 'Local' },
+      runtimeVariables: {
+        baseUrl: 'https://api.test',
+        existing: 'collection-value',
+        userId: 'user-7'
+      },
+      workspaceContext: { uid: 'workspace_local', pathname: '/workspace' },
+      item: {
+        request: {
+          url: '{{baseUrl}}/users/{{userId}}',
+          headers: [{ name: 'Authorization', value: '{{AUTH_TOKEN}}', enabled: true }]
+        }
+      }
+    });
     expect(sent.every((entry) => entry.channel === 'main:flow-runtime-event')).toBe(true);
-    expect(JSON.stringify(sent)).not.toContain('electron-secret');
-    expect(JSON.stringify(result)).not.toContain('electron-secret');
-    expect(result.previews.request_one.headers.Authorization).toBe('[REDACTED]');
+    expect(result.previews.request_one.runtimeVariables).toEqual({ userId: 'user-7' });
   });
 
   it('cancels an active scheduler through the shared AbortSignal', async () => {
@@ -166,9 +198,8 @@ describe('FlowRuntimeService', () => {
     const running = service.run({
       runId: 'run_cancel',
       flow: createFlow(),
-      workspacePath: '/workspace',
-      requestCatalog: createCatalog(),
-      environmentValues: { AUTH_TOKEN: { value: 'secret', secret: true } }
+      workspacePath: '/workspace/collections/api',
+      requestCatalog: createCatalog()
     });
 
     await started;
@@ -183,15 +214,19 @@ describe('FlowRuntimeService', () => {
     const result = await service.previewRequest({
       flow: createFlow(),
       nodeId: 'request_one',
-      requestCatalog: createCatalog(),
-      environmentValues: { AUTH_TOKEN: { value: 'Bearer preview-secret', secret: true } }
+      requestCatalog: createCatalog()
     });
 
     expect(result.preview.headers.Authorization).toBe('[REDACTED]');
-    expect(JSON.stringify(result)).not.toContain('preview-secret');
+    expect(result.preview.runtimeVariables).toEqual({
+      baseUrl: 'https://api.test',
+      existing: 'collection-value',
+      userId: 'user-7'
+    });
+    expect(result.preview.url).toBe('https://api.test/users/user-7');
     expect(result.bindings[0].provenance).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'environment', nodeId: 'env_secret' }),
-      expect.objectContaining({ kind: 'binding', edgeId: 'data_auth' })
+      expect.objectContaining({ kind: 'input', nodeId: 'mapped_user' }),
+      expect.objectContaining({ kind: 'binding', edgeId: 'data_user_id' })
     ]));
   });
 
@@ -232,9 +267,8 @@ describe('FlowRuntimeService', () => {
     });
     const payload = {
       flow,
-      workspacePath: '/workspace',
-      requestCatalog: createCatalog(),
-      environmentValues: { AUTH_TOKEN: { value: 'Bearer resume-secret', secret: true } }
+      workspacePath: '/workspace/collections/api',
+      requestCatalog: createCatalog()
     };
 
     const paused = await service.run({ ...payload, runId: 'run_pause_service' });
@@ -341,11 +375,11 @@ describe('FlowRuntimeService', () => {
         { id: 'fork', semanticKey: 'fork', kind: 'fork', position: { x: 120, y: 0 }, config: { joinNodeId: 'join' } },
         {
           id: 'request_one', semanticKey: 'request_one', kind: 'http', position: { x: 250, y: -80 },
-          requestRef: { collectionPath: 'collections/api', itemPathname: 'one.bru' }, config: {}
+          requestRef: { collectionPath: '.', itemPathname: 'one.bru' }, config: {}
         },
         {
           id: 'request_two', semanticKey: 'request_two', kind: 'http', position: { x: 250, y: 80 },
-          requestRef: { collectionPath: 'collections/api', itemPathname: 'two.bru' }, config: {}
+          requestRef: { collectionPath: '.', itemPathname: 'two.bru' }, config: {}
         },
         { id: 'join', semanticKey: 'join', kind: 'join', position: { x: 420, y: 0 }, config: { mode: 'all' } },
         { id: 'end', semanticKey: 'end', kind: 'end', position: { x: 580, y: 0 }, config: {} }
@@ -395,7 +429,7 @@ describe('FlowRuntimeService', () => {
     const running = service.run({
       runId: 'run_parallel_cancel_service',
       flow,
-      workspacePath: '/workspace',
+      workspacePath: '/workspace/collections/api',
       requestCatalog: catalog
     });
 

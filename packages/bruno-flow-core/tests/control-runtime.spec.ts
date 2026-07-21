@@ -748,6 +748,115 @@ describe('Phase 5 deterministic control runtime', () => {
     expect(result.error?.nodeId).toBe('subflow');
   });
 
+  it('rejects a reusable subflow before execution when required contract inputs are missing', async () => {
+    const child: FlowDefinition = {
+      schemaVersion: 1,
+      uid: 'flow_child_required_input',
+      name: 'Child requiring email',
+      revision: 'rev:child-required-input',
+      workspace: { uid: 'workspace_local' },
+      defaults: {},
+      inputSchema: {
+        type: 'object',
+        properties: { email: { type: 'string' } },
+        required: ['email']
+      },
+      nodes: [
+        { id: 'child_start', semanticKey: 'child_start', kind: 'start', position: { x: 0, y: 0 }, config: {} },
+        { id: 'child_end', semanticKey: 'child_end', kind: 'end', position: { x: 240, y: 0 }, config: {} }
+      ],
+      controlEdges: [{ id: 'child_start_end', sourceNodeId: 'child_start', targetNodeId: 'child_end' }],
+      dataEdges: [],
+      frames: [],
+      metadata
+    };
+    const parent: FlowDefinition = {
+      schemaVersion: 1,
+      uid: 'flow_parent_missing_input',
+      name: 'Parent missing child input',
+      revision: 'rev:parent-missing-input',
+      workspace: { uid: 'workspace_local' },
+      defaults: {},
+      nodes: [
+        { id: 'parent_start', semanticKey: 'parent_start', kind: 'start', position: { x: 0, y: 0 }, config: {} },
+        { id: 'subflow', semanticKey: 'subflow', kind: 'subflow', position: { x: 160, y: 0 }, config: { flowUid: child.uid }, policy: { sideEffect: 'none' } },
+        { id: 'parent_end', semanticKey: 'parent_end', kind: 'end', position: { x: 320, y: 0 }, config: {} }
+      ],
+      controlEdges: [
+        { id: 'parent_start_subflow', sourceNodeId: 'parent_start', targetNodeId: 'subflow' },
+        { id: 'parent_subflow_end', sourceNodeId: 'subflow', targetNodeId: 'parent_end' }
+      ],
+      dataEdges: [],
+      frames: [],
+      metadata
+    };
+    const scheduler = schedulerFor(async ({ node }) => successExecution(node.id), { resolveSubflow: () => child });
+    const result = await scheduler.run({ flow: parent, runId: 'missing_subflow_input' });
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatchObject({ nodeId: 'subflow' });
+    expect(result.error?.message).toContain('input contract failed');
+    expect(result.error?.message).toContain('/email');
+  });
+
+  it('publishes only declared End-node outputs from reusable subflows', async () => {
+    const child: FlowDefinition = {
+      schemaVersion: 1,
+      uid: 'flow_child_contract',
+      name: 'Child contract',
+      revision: 'rev:child-contract',
+      workspace: { uid: 'workspace_local' },
+      defaults: {},
+      outputSchema: {
+        type: 'object',
+        properties: {
+          userId: {
+            'type': 'string',
+            'x-bruno-flow-source': { nodeId: 'child_request', path: 'response.body.nodeId' }
+          }
+        },
+        required: ['userId']
+      },
+      nodes: [
+        { id: 'child_start', semanticKey: 'child_start', kind: 'start', position: { x: 0, y: 0 }, config: {} },
+        requestNode('child_request', 160),
+        { id: 'child_end', semanticKey: 'child_end', kind: 'end', position: { x: 320, y: 0 }, config: {} }
+      ],
+      controlEdges: [
+        { id: 'child_start_request', sourceNodeId: 'child_start', targetNodeId: 'child_request' },
+        { id: 'child_request_end', sourceNodeId: 'child_request', targetNodeId: 'child_end' }
+      ],
+      dataEdges: [],
+      frames: [],
+      metadata
+    };
+    const parent: FlowDefinition = {
+      schemaVersion: 1,
+      uid: 'flow_parent_contract',
+      name: 'Parent contract',
+      revision: 'rev:parent-contract',
+      workspace: { uid: 'workspace_local' },
+      defaults: {},
+      nodes: [
+        { id: 'parent_start', semanticKey: 'parent_start', kind: 'start', position: { x: 0, y: 0 }, config: {} },
+        { id: 'subflow', semanticKey: 'subflow', kind: 'subflow', position: { x: 160, y: 0 }, config: { flowUid: child.uid }, policy: { sideEffect: 'none' } },
+        { id: 'parent_end', semanticKey: 'parent_end', kind: 'end', position: { x: 320, y: 0 }, config: {} }
+      ],
+      controlEdges: [
+        { id: 'parent_start_subflow', sourceNodeId: 'parent_start', targetNodeId: 'subflow' },
+        { id: 'parent_subflow_end', sourceNodeId: 'subflow', targetNodeId: 'parent_end' }
+      ],
+      dataEdges: [],
+      frames: [],
+      metadata
+    };
+    const scheduler = schedulerFor(async ({ node }) => successExecution(node.id), { resolveSubflow: () => child });
+    const result = await scheduler.run({ flow: parent, runId: 'subflow_contract' });
+    expect(result.status).toBe('success');
+    const subflowOutputs = result.outputs.subflow.outputs as { value: Record<string, unknown> };
+    expect(subflowOutputs).toMatchObject({ value: { userId: 'child_request' } });
+    expect(subflowOutputs.value).not.toHaveProperty('child_request');
+  });
+
   it('rejects recursive subflows before starting an unbounded child runtime', async () => {
     const flow: FlowDefinition = {
       schemaVersion: 1,

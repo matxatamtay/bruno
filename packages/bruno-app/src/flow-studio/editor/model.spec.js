@@ -3,14 +3,23 @@ import { buildEnvironmentRuntimeValues, buildFlowRequestCatalog, collectRequestA
 import {
   addControlEdge,
   addNode,
+  autoLayoutFlow,
   createAuthoringFlow,
   createControlNode,
+  createFlowClipboard,
   createInputNode,
   createRequestNodeFromAsset,
   deleteEntities,
+  getFlowDataCases,
+  getFlowOutputDefinitions,
   groupNodesInFrame,
+  pasteFlowClipboard,
+  removeFlowDataCase,
+  removeFlowOutput,
   setNodeBinding,
-  updateFormInputNode
+  updateFormInputNode,
+  upsertFlowDataCase,
+  upsertFlowOutput
 } from './model';
 
 const workspace = {
@@ -62,48 +71,80 @@ const createFlow = () => createAuthoringFlow({
 });
 
 describe('Flow Studio authoring model', () => {
-  it('collects draggable requests from multiple workspace collections', () => {
-    const assets = collectRequestAssets(workspace, collections);
+  it('collects draggable requests only from the current collection', () => {
+    const accountAssets = collectRequestAssets(collections[0]);
+    const billingAssets = collectRequestAssets(collections[1]);
 
-    expect(assets).toHaveLength(2);
-    expect(assets.map((asset) => asset.collectionName)).toEqual(['Accounts', 'Billing']);
-    expect(assets[0]).toMatchObject({
-      collectionPath: 'collections/a',
+    expect(accountAssets).toHaveLength(1);
+    expect(accountAssets[0]).toMatchObject({
+      collectionName: 'Accounts',
+      collectionPath: '.',
       itemPathname: 'users/create.bru',
       method: 'POST'
     });
-    expect(assets[1]).toMatchObject({
-      collectionPath: 'collections/b',
+    expect(billingAssets).toHaveLength(1);
+    expect(billingAssets[0]).toMatchObject({
+      collectionName: 'Billing',
+      collectionPath: '.',
       itemPathname: 'checkout/charge.bru',
       breadcrumb: 'Checkout'
     });
   });
 
-  it('builds execution catalog entries and secret-aware environment values from workspace collections', () => {
-    const runtimeCollections = collections.map((collection, index) => ({
-      ...collection,
-      globalEnvironmentVariables: index === 0 ? { SHARED: 'global', PUBLIC: 'visible' } : {},
-      globalEnvSecrets: index === 0 ? ['SHARED'] : [],
-      activeEnvironmentUid: index === 0 ? 'env_local' : null,
-      environments: index === 0 ? [{
+  it('does not advertise protocols that are not yet routed through the shared Bruno lifecycle', () => {
+    const mixedCollection = {
+      ...collections[0],
+      items: [
+        ...collections[0].items,
+        {
+          uid: 'request_grpc',
+          name: 'Legacy gRPC call',
+          type: 'grpc-request',
+          pathname: '/workspace/collections/a/grpc/health.bru',
+          request: { methodType: 'unary', url: 'grpc://localhost:50051' }
+        },
+        {
+          uid: 'request_ws',
+          name: 'Legacy socket',
+          type: 'ws-request',
+          pathname: '/workspace/collections/a/socket.bru',
+          request: { url: 'wss://example.test' }
+        }
+      ]
+    };
+
+    expect(collectRequestAssets(mixedCollection).map((asset) => asset.itemUid)).toEqual(['request_users']);
+    expect(buildFlowRequestCatalog(mixedCollection).map((asset) => asset.item.uid)).toEqual(['request_users']);
+  });
+
+  it('builds execution context from the current collection and its active Bruno environment', () => {
+    const runtimeCollection = {
+      ...collections[0],
+      globalEnvironmentVariables: { SHARED: 'global', PUBLIC: 'visible' },
+      globalEnvSecrets: ['SHARED'],
+      activeEnvironmentUid: 'env_local',
+      environments: [{
         uid: 'env_local',
+        name: 'Local',
         variables: [
           { name: 'SHARED', value: 'environment', enabled: true, secret: true },
           { name: 'REGION', value: 'eu', enabled: true }
         ]
-      }] : [],
-      runtimeVariables: index === 0 ? { SHARED: 'runtime', REQUEST_TOKEN: 'runtime-secret' } : {}
-    }));
+      }],
+      runtimeVariables: { SHARED: 'runtime', REQUEST_TOKEN: 'runtime-secret' }
+    };
 
-    const catalog = buildFlowRequestCatalog(workspace, runtimeCollections);
-    const environment = buildEnvironmentRuntimeValues(workspace, runtimeCollections);
+    const catalog = buildFlowRequestCatalog(runtimeCollection);
+    const environment = buildEnvironmentRuntimeValues(runtimeCollection);
 
-    expect(catalog).toHaveLength(2);
+    expect(catalog).toHaveLength(1);
     expect(catalog[0]).toMatchObject({
-      collectionPath: 'collections/a',
+      collectionPath: '.',
       itemPathname: 'users/create.bru',
       item: { uid: 'request_users' },
-      collection: { uid: 'collection_a' }
+      collection: { uid: 'collection_a' },
+      environmentContext: { uid: 'env_local', name: 'Local' },
+      runtimeVariables: { SHARED: 'runtime', REQUEST_TOKEN: 'runtime-secret' }
     });
     expect(environment).toMatchObject({
       SHARED: { value: 'runtime', secret: true },
@@ -113,51 +154,39 @@ describe('Flow Studio authoring model', () => {
     });
   });
 
-  it('creates request and input nodes with body, query and header bindings', () => {
-    const assets = collectRequestAssets(workspace, collections);
+  it('connects a response value to a Bruno runtime variable without editing the request template', () => {
+    const assets = collectRequestAssets(collections[0]);
     let flow = createFlow();
-    const input = createInputNode(flow, 'static-input', { x: 260, y: 120 }, {
-      name: 'Customer context',
-      value: '{"id":"cus_1"}',
-      outputPath: 'customer'
+    const response = createInputNode(flow, 'response-extractor', { x: 260, y: 120 }, {
+      name: 'Created customer id',
+      sourceNodeId: 'request_create',
+      sourcePath: 'response.body',
+      path: 'customer.id',
+      outputPath: 'value'
     });
-    flow = addNode(flow, input);
+    flow = addNode(flow, response);
     const request = createRequestNodeFromAsset(flow, assets[0], { x: 480, y: 220 });
     flow = addNode(flow, request);
 
     flow = setNodeBinding(flow, {
       targetNodeId: request.id,
-      channel: 'body',
-      key: 'customer.id',
-      sourceNodeId: input.id,
-      sourcePath: 'customer.id',
+      channel: 'runtime',
+      key: 'customerId',
+      sourceNodeId: response.id,
+      sourcePath: 'value',
       required: true
-    });
-    flow = setNodeBinding(flow, {
-      targetNodeId: request.id,
-      channel: 'query',
-      key: 'expand',
-      sourceNodeId: input.id,
-      sourcePath: 'customer.expand'
-    });
-    flow = setNodeBinding(flow, {
-      targetNodeId: request.id,
-      channel: 'header',
-      key: 'X-Customer-Id',
-      sourceNodeId: input.id,
-      sourcePath: 'customer.id'
     });
 
     const authoredRequest = flow.nodes.find((node) => node.id === request.id);
     expect(authoredRequest.config.bindings).toMatchObject({
-      body: { 'customer.id': { sourceNodeId: input.id, sourcePath: 'customer.id', required: true } },
-      query: { expand: { sourceNodeId: input.id, sourcePath: 'customer.expand', required: false } },
-      header: { 'X-Customer-Id': { sourceNodeId: input.id, sourcePath: 'customer.id', required: false } }
+      runtime: { customerId: { sourceNodeId: response.id, sourcePath: 'value', required: true } }
     });
-    expect(flow.dataEdges.map((edge) => edge.target.path).sort()).toEqual([
-      'request.body.customer.id',
-      'request.header.X-Customer-Id',
-      'request.query.expand'
+    expect(flow.dataEdges).toEqual([
+      expect.objectContaining({
+        source: { nodeId: response.id, path: 'value' },
+        target: { nodeId: request.id, path: 'runtime.customerId' },
+        required: true
+      })
     ]);
   });
 
@@ -239,8 +268,8 @@ describe('Flow Studio authoring model', () => {
     let flow = createFlow();
     const input = createInputNode(flow, 'environment-input', { x: 300, y: 180 }, { name: 'API token' });
     flow = addNode(flow, input);
-    const assets = collectRequestAssets(workspace, collections);
-    const request = createRequestNodeFromAsset(flow, assets[1], { x: 560, y: 260 });
+    const assets = collectRequestAssets(collections[1]);
+    const request = createRequestNodeFromAsset(flow, assets[0], { x: 560, y: 260 });
     flow = addNode(flow, request);
 
     const grouped = groupNodesInFrame(flow, [input.id, request.id]);
@@ -290,8 +319,91 @@ describe('Flow Studio authoring model', () => {
     expect(next.frames).toEqual([expect.objectContaining({ id: child.id, parentFrameId: undefined })]);
   });
 
+  it('persists named data cases inside the flow input contract', () => {
+    let flow = createFlow();
+    flow = upsertFlowDataCase(flow, { id: 'case_happy', name: 'Happy path', values: { email: 'happy@example.test' } });
+    flow = upsertFlowDataCase(flow, { id: 'case_invalid', name: 'Invalid OTP', values: { otp: '000000' } });
+    expect(getFlowDataCases(flow)).toEqual([
+      { id: 'case_happy', name: 'Happy path', values: { email: 'happy@example.test' } },
+      { id: 'case_invalid', name: 'Invalid OTP', values: { otp: '000000' } }
+    ]);
+    flow = removeFlowDataCase(flow, 'case_happy');
+    expect(getFlowDataCases(flow).map((dataCase) => dataCase.id)).toEqual(['case_invalid']);
+    const restarted = parseFlow(serializeFlow(flow));
+    expect(getFlowDataCases(restarted)).toEqual(getFlowDataCases(flow));
+  });
+
+  it('declares reusable flow outputs with node and path sources', () => {
+    let flow = createFlow();
+    const request = createRequestNodeFromAsset(flow, collectRequestAssets(collections[0])[0], { x: 400, y: 120 });
+    flow = addNode(flow, request);
+    flow = upsertFlowOutput(flow, {
+      name: 'userId',
+      type: 'string',
+      required: true,
+      sourceNodeId: request.id,
+      sourcePath: 'response.body.data.id'
+    });
+    expect(getFlowOutputDefinitions(flow)).toEqual([
+      expect.objectContaining({ name: 'userId', required: true, sourceNodeId: request.id, sourcePath: 'response.body.data.id' })
+    ]);
+    const restarted = parseFlow(serializeFlow(flow));
+    expect(getFlowOutputDefinitions(restarted)[0]).toMatchObject({ name: 'userId', sourceNodeId: request.id });
+    expect(getFlowOutputDefinitions(removeFlowOutput(flow, 'userId'))).toEqual([]);
+  });
+
+  it('copies and pastes a connected request slice with remapped node references', () => {
+    let flow = createAuthoringFlow({ uid: 'flow_clipboard', name: 'Clipboard', workspaceUid: workspace.uid });
+    const assets = collectRequestAssets(collections[0]);
+    const source = createRequestNodeFromAsset(flow, assets[0], { x: 200, y: 100 });
+    flow = addNode(flow, source);
+    const target = createRequestNodeFromAsset(flow, { ...assets[0], itemUid: 'request_update', itemPathname: 'users/update.bru', name: 'Update user' }, { x: 500, y: 100 });
+    flow = addNode(flow, target);
+    flow = addControlEdge(flow, { source: source.id, target: target.id });
+    flow = setNodeBinding(flow, {
+      targetNodeId: target.id,
+      channel: 'runtime',
+      key: 'userId',
+      sourceNodeId: source.id,
+      sourcePath: 'response.body.data.id'
+    });
+
+    const clipboard = createFlowClipboard(flow, { nodeIds: [source.id, target.id], frameIds: [], controlEdgeIds: [], dataEdgeIds: [] });
+    const pasted = pasteFlowClipboard(flow, clipboard);
+    const pastedNodes = pasted.selection.nodeIds.map((id) => pasted.flow.nodes.find((node) => node.id === id));
+    const pastedSource = pastedNodes.find((node) => node.name === source.name);
+    const pastedTarget = pastedNodes.find((node) => node.name === target.name);
+
+    expect(pastedSource.id).not.toBe(source.id);
+    expect(pastedTarget.config.bindings.runtime.userId.sourceNodeId).toBe(pastedSource.id);
+    expect(pasted.flow.controlEdges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceNodeId: pastedSource.id, targetNodeId: pastedTarget.id })
+    ]));
+    expect(pasted.flow.dataEdges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: { nodeId: pastedSource.id, path: 'response.body.data.id' },
+        target: { nodeId: pastedTarget.id, path: 'runtime.userId' }
+      })
+    ]));
+  });
+
+  it('auto-layouts control-flow levels from Start to End', () => {
+    let flow = createAuthoringFlow({ uid: 'flow_layout', name: 'Layout', workspaceUid: workspace.uid });
+    const start = flow.nodes.find((node) => node.kind === 'start');
+    const end = flow.nodes.find((node) => node.kind === 'end');
+    const request = createRequestNodeFromAsset(flow, collectRequestAssets(collections[0])[0], { x: 20, y: 900 });
+    flow = addNode(flow, request);
+    flow = addControlEdge(flow, { source: start.id, target: request.id });
+    flow = addControlEdge(flow, { source: request.id, target: end.id });
+
+    const laidOut = autoLayoutFlow(flow);
+    const positions = Object.fromEntries(laidOut.nodes.map((node) => [node.id, node.position]));
+    expect(positions[start.id].x).toBeLessThan(positions[request.id].x);
+    expect(positions[request.id].x).toBeLessThan(positions[end.id].x);
+  });
+
   it('round-trips an authored graph so restart does not lose nodes, bindings or viewport', () => {
-    const assets = collectRequestAssets(workspace, collections);
+    const assets = collectRequestAssets(collections[0]);
     let flow = createFlow();
     const input = createInputNode(flow, 'form-input', { x: 250, y: 150 }, { name: 'Email', fieldName: 'email' });
     flow = addNode(flow, input);
@@ -299,7 +411,7 @@ describe('Flow Studio authoring model', () => {
     flow = addNode(flow, request);
     flow = setNodeBinding(flow, {
       targetNodeId: request.id,
-      channel: 'body',
+      channel: 'runtime',
       key: 'email',
       sourceNodeId: input.id,
       sourcePath: 'value'
@@ -311,7 +423,7 @@ describe('Flow Studio authoring model', () => {
     expect(restarted.nodes).toHaveLength(flow.nodes.length);
     expect(restarted.dataEdges).toHaveLength(1);
     expect(restarted.viewport).toEqual({ x: -120, y: 40, zoom: 0.78 });
-    expect(restarted.nodes.find((node) => node.id === request.id).config.bindings.body.email).toMatchObject({
+    expect(restarted.nodes.find((node) => node.id === request.id).config.bindings.runtime.email).toMatchObject({
       sourceNodeId: input.id,
       sourcePath: 'value'
     });

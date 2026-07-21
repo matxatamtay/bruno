@@ -2,11 +2,16 @@ import React from 'react';
 import {
   IconArrowBackUp,
   IconArrowForwardUp,
+  IconClipboard,
+  IconCopy,
   IconDeviceFloppy,
+  IconDeviceDesktop,
   IconFrame,
   IconLayersIntersect,
+  IconLayoutGrid,
   IconPlayerPlay,
   IconPlayerStop,
+  IconPlus,
   IconSearch,
   IconTrash
 } from '@tabler/icons';
@@ -34,11 +39,23 @@ const Toolbar = ({
   onAddFrame,
   onGroup,
   onDelete,
+  onCopy,
+  onPaste,
+  onAutoLayout,
+  canCopy,
+  canPaste,
   canGroup,
   canDelete,
   runStatus,
   onRun,
-  onCancel
+  onCancel,
+  dataCases = [],
+  activeCaseId = '',
+  onCaseChange,
+  onCreateCase,
+  onUpdateCase,
+  onRenameCase,
+  onDeleteCase
 }) => (
   <header className="flow-toolbar">
     <div className="flow-toolbar-title">
@@ -59,8 +76,32 @@ const Toolbar = ({
         : <ToolButton title="Run flow" onClick={onRun} disabled={!flow} testId="flow-toolbar-run"><IconPlayerPlay size={16} /></ToolButton>}
       <span className="flow-toolbar-divider" />
       <ToolButton title="Add frame" onClick={onAddFrame}><IconFrame size={16} /></ToolButton>
+      <ToolButton title="Auto layout" onClick={onAutoLayout} disabled={!flow}><IconLayoutGrid size={16} /></ToolButton>
       <ToolButton title="Group selected nodes" onClick={onGroup} disabled={!canGroup}><IconLayersIntersect size={16} /></ToolButton>
+      <ToolButton title="Copy selected (Ctrl/Cmd+C)" onClick={onCopy} disabled={!canCopy}><IconCopy size={16} /></ToolButton>
+      <ToolButton title="Paste (Ctrl/Cmd+V)" onClick={onPaste} disabled={!canPaste}><IconClipboard size={16} /></ToolButton>
       <ToolButton title="Delete selected" onClick={onDelete} disabled={!canDelete}><IconTrash size={16} /></ToolButton>
+    </div>
+    <div className="flow-toolbar-case">
+      <IconDeviceDesktop size={14} />
+      <select aria-label="Data case" value={activeCaseId} onChange={(event) => onCaseChange?.(event.target.value)}>
+        <option value="">Live inputs</option>
+        {dataCases.map((dataCase) => <option key={dataCase.id} value={dataCase.id}>{dataCase.name}</option>)}
+      </select>
+      {activeCaseId && (
+        <input
+          key={activeCaseId}
+          aria-label="Data case name"
+          defaultValue={dataCases.find((dataCase) => dataCase.id === activeCaseId)?.name || ''}
+          onBlur={(event) => onRenameCase?.(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') event.currentTarget.blur();
+          }}
+        />
+      )}
+      <ToolButton title="Create data case from current inputs" onClick={onCreateCase}><IconPlus size={14} /></ToolButton>
+      <ToolButton title="Update selected data case" onClick={onUpdateCase} disabled={!activeCaseId}><IconDeviceFloppy size={14} /></ToolButton>
+      <ToolButton title="Delete selected data case" onClick={onDeleteCase} disabled={!activeCaseId}><IconTrash size={14} /></ToolButton>
     </div>
     <label className="flow-toolbar-search">
       <IconSearch size={14} />

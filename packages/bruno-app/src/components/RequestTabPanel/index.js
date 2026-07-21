@@ -445,14 +445,6 @@ const RequestTabPanel = () => {
     return <GlobalEnvironmentSettings />;
   }
 
-  if (focusedTab.type === 'workspaceFlowStudio') {
-    return activeWorkspace ? (
-      <React.Suspense fallback={<RequestTabPanelLoading />}>
-        <FlowStudioWorkspace workspace={activeWorkspace} />
-      </React.Suspense>
-    ) : null;
-  }
-
   if (!focusedTab.uid || !focusedTab.collectionUid) {
     return <div className="pb-4 px-4">An error occurred!</div>;
   }
@@ -463,6 +455,14 @@ const RequestTabPanel = () => {
 
   if (focusedTab.type === 'git-review') {
     return <GitReview collection={collection} />;
+  }
+
+  if (focusedTab.type === 'flow-studio') {
+    return (
+      <React.Suspense fallback={<RequestTabPanelLoading />}>
+        <FlowStudioWorkspace collection={collection} workspace={activeWorkspace} />
+      </React.Suspense>
+    );
   }
 
   if (focusedTab.type === 'web-recorder') {

@@ -18,7 +18,8 @@ import {
   IconCode,
   IconAppWindow,
   IconTransform,
-  IconPlayerRecord
+  IconPlayerRecord,
+  IconGitBranch
 } from '@tabler/icons';
 import IconSparkles from 'components/Icons/IconSparkles';
 import OpenAPISyncIcon from 'components/Icons/OpenAPISync';
@@ -265,6 +266,15 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
       uid: `${collection.uid}-web-recorder`,
       collectionUid: collection.uid,
       type: 'web-recorder',
+      preview: false
+    }));
+  };
+
+  const handleOpenFlowStudio = () => {
+    dispatch(addTab({
+      uid: `${collection.uid}-flow-studio`,
+      collectionUid: collection.uid,
+      type: 'flow-studio',
       preview: false
     }));
   };
@@ -753,11 +763,18 @@ const CollectionHeader = ({ collection, isScratchCollection }) => {
                 <GitActions key={collection.pathname} collectionPath={collection.pathname} collectionUid={collection.uid} />
               )}
               {!isScratchCollection && (
-                <ToolHint text="Intelligence Suite" toolhintId="WebRecorderToolhintId" place="bottom">
-                  <ActionIcon onClick={handleOpenWebRecorder} aria-label="Intelligence Suite" size="sm" data-testid="web-recorder">
-                    <IconPlayerRecord size={16} strokeWidth={1.5} />
-                  </ActionIcon>
-                </ToolHint>
+                <>
+                  <ToolHint text="Flow Studio" toolhintId="FlowStudioToolhintId" place="bottom">
+                    <ActionIcon onClick={handleOpenFlowStudio} aria-label="Flow Studio" size="sm" data-testid="flow-studio">
+                      <IconGitBranch size={16} strokeWidth={1.5} />
+                    </ActionIcon>
+                  </ToolHint>
+                  <ToolHint text="Intelligence Suite" toolhintId="WebRecorderToolhintId" place="bottom">
+                    <ActionIcon onClick={handleOpenWebRecorder} aria-label="Intelligence Suite" size="sm" data-testid="web-recorder">
+                      <IconPlayerRecord size={16} strokeWidth={1.5} />
+                    </ActionIcon>
+                  </ToolHint>
+                </>
               )}
               {/* OpenAPI Sync - standalone only when configured and beta enabled */}
               {hasOpenApiSyncConfigured && (

@@ -47,7 +47,9 @@ The bridge rejects non-loopback endpoints unless `BRUNO_DESKTOP_ALLOW_REMOTE=1` 
 
 When Bruno is stopped, status returns actionable instructions to open Bruno, enable MCP, and configure the token instead of exposing a low-level `ECONNREFUSED` error.
 
-## LCA tools
+## Historical LCA tools
+
+> Superseded by the collection-native [Bruno Desktop MCP](../../mcp/README.md). The live server no longer publishes Flow Studio or Intelligence Suite tools and does not use the policy/approval bridge described below.
 
 ### Read and discovery
 

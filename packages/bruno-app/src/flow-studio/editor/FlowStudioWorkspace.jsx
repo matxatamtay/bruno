@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { ReactFlowProvider } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import toast from 'react-hot-toast';
+import cloneDeep from 'lodash/cloneDeep';
 import { useDispatch, useSelector } from 'react-redux';
 import { IconAlertTriangle, IconFilePlus, IconGitBranch, IconRefresh, IconTrash } from '@tabler/icons';
 import {
@@ -15,6 +16,13 @@ import {
   saveFlowFile
 } from 'providers/ReduxStore/slices/flow-catalog-actions';
 import { selectWorkspaceFlowCatalog, selectWorkspaceFlows } from 'providers/ReduxStore/slices/flow-catalog';
+import EnvironmentSelector from 'components/Environments/EnvironmentSelector';
+import {
+  findItemInCollection,
+  getGlobalEnvironmentVariables,
+  getGlobalEnvironmentVariablesMasked
+} from 'utils/collections';
+import { getPromptVariableNamesForRequest, promptForRequestVariables } from 'providers/ReduxStore/slices/collections/actions';
 import {
   cancelFlowRun,
   deleteFlowCheckpoint,
@@ -29,12 +37,18 @@ import {
   collectRequestAssets
 } from './assets';
 import {
+  autoLayoutFlow,
   createAuthoringFlow,
   createEntityId,
+  createFlowClipboard,
   createFrame,
   deleteEntities,
+  getFlowDataCases,
   groupNodesInFrame,
-  REQUEST_NODE_KINDS
+  pasteFlowClipboard,
+  removeFlowDataCase,
+  REQUEST_NODE_KINDS,
+  upsertFlowDataCase
 } from './model';
 import { useFlowEditor } from './useFlowEditor';
 import AssetsPanel from './components/AssetsPanel';
@@ -135,11 +149,13 @@ const FlowCatalogRail = ({ entries, activeFlowUid, onOpen, creating, onSetCreati
   </div>
 );
 
-const FlowStudioWorkspace = ({ workspace }) => {
+const FlowStudioWorkspace = ({ collection, workspace }) => {
   const dispatch = useDispatch();
-  const collections = useSelector((state) => state.collections.collections);
-  const catalog = useSelector((state) => selectWorkspaceFlowCatalog(state, workspace.uid));
-  const flowEntries = useSelector((state) => selectWorkspaceFlows(state, workspace.uid));
+  const { globalEnvironments, activeGlobalEnvironmentUid } = useSelector((state) => state.globalEnvironments);
+  const scopeUid = collection?.uid;
+  const scopePath = collection?.pathname;
+  const catalog = useSelector((state) => selectWorkspaceFlowCatalog(state, scopeUid));
+  const flowEntries = useSelector((state) => selectWorkspaceFlows(state, scopeUid));
   const editor = useFlowEditor();
   const [record, setRecord] = useState(null);
   const [selection, setSelection] = useState(emptySelection);
@@ -152,29 +168,63 @@ const FlowStudioWorkspace = ({ workspace }) => {
   const [externalChange, setExternalChange] = useState(null);
   const [runtime, dispatchRuntime] = useReducer(runtimeProjectionReducer, undefined, createRuntimeProjection);
   const [runInputs, setRunInputs] = useState({});
+  const [activeCaseId, setActiveCaseId] = useState('');
+  const [runHistory, setRunHistory] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState(null);
   const [previewing, setPreviewing] = useState(false);
   const [checkpoints, setCheckpoints] = useState([]);
+  const [flowClipboard, setFlowClipboard] = useState(null);
   const searchInputRef = useRef(null);
   const draftTimerRef = useRef(null);
 
-  const requestAssets = useMemo(() => collectRequestAssets(workspace, collections), [workspace, collections]);
-  const requestCatalog = useMemo(() => buildFlowRequestCatalog(workspace, collections), [workspace, collections]);
-  const environmentValues = useMemo(() => buildEnvironmentRuntimeValues(workspace, collections), [workspace, collections]);
+  const executionCollection = useMemo(() => {
+    if (!collection) return null;
+    const copy = cloneDeep(collection);
+    copy.globalEnvironmentVariables = getGlobalEnvironmentVariables({
+      globalEnvironments,
+      activeGlobalEnvironmentUid
+    });
+    copy.globalEnvSecrets = getGlobalEnvironmentVariablesMasked({
+      globalEnvironments,
+      activeGlobalEnvironmentUid
+    });
+    return copy;
+  }, [collection, globalEnvironments, activeGlobalEnvironmentUid]);
+  const requestAssets = useMemo(() => collectRequestAssets(collection), [collection]);
+  const requestCatalog = useMemo(() => buildFlowRequestCatalog(executionCollection), [executionCollection]);
+  const environmentValues = useMemo(() => buildEnvironmentRuntimeValues(executionCollection), [executionCollection]);
+  const activeEnvironment = (collection?.environments || []).find((environment) => environment.uid === collection.activeEnvironmentUid) || null;
+  const activeEnvironmentName = activeEnvironment?.name || 'No environment';
+  const activeGlobalEnvironment = (globalEnvironments || []).find((environment) => environment.uid === activeGlobalEnvironmentUid) || null;
   const activeFlowUid = record?.flow?.uid || editor.flow?.uid || null;
+  const dataCases = useMemo(() => getFlowDataCases(editor.flow), [editor.flow]);
+  const activeDataCase = dataCases.find((dataCase) => dataCase.id === activeCaseId) || null;
   const activeEntry = flowEntries.find((entry) => entry.uid === activeFlowUid);
+  const reusableFlowAssets = useMemo(() => flowEntries
+    .filter((entry) => entry.status === 'valid' && entry.uid !== activeFlowUid)
+    .map((entry) => ({
+      assetType: 'control',
+      id: `subflow:${entry.uid || entry.relativePath}`,
+      kind: 'subflow',
+      name: entry.name,
+      flowUid: entry.uid,
+      relativePath: entry.relativePath,
+      revision: entry.revision,
+      inputSchema: entry.inputSchema,
+      outputSchema: entry.outputSchema
+    })), [activeFlowUid, flowEntries]);
   const draftRecovery = activeFlowUid ? catalog.drafts?.[activeFlowUid] : null;
   const showDraftRecovery = Boolean(draftRecovery && !editor.dirty);
   const hasSelection = Object.values(selection).some((ids) => Array.isArray(ids) && ids.length > 0);
   const refreshCheckpoints = useCallback(async (flowUid) => {
-    if (!flowUid || !workspace.pathname) {
+    if (!flowUid || !scopePath) {
       setCheckpoints([]);
       return [];
     }
     try {
       const next = await dispatch(listFlowCheckpoints({
-        workspacePath: workspace.pathname,
+        workspacePath: scopePath,
         flowUid
       }));
       setCheckpoints(next);
@@ -183,25 +233,54 @@ const FlowStudioWorkspace = ({ workspace }) => {
       setCheckpoints([]);
       return [];
     }
-  }, [dispatch, workspace.pathname]);
+  }, [dispatch, scopePath]);
   const selectedRequestNode = selection.nodeIds?.length === 1
     ? editor.flow?.nodes?.find((node) => node.id === selection.nodeIds[0] && REQUEST_NODE_KINDS.has(node.kind)) || null
     : null;
+  const selectedRequestAsset = selectedRequestNode
+    ? requestAssets.find((asset) => (
+      asset.itemUid === selectedRequestNode.requestRef?.expectedItemUid
+      || asset.itemPathname === selectedRequestNode.requestRef?.itemPathname
+    )) || null
+    : null;
+
+  const selectedRequestItem = selectedRequestAsset ? findItemInCollection(collection, selectedRequestAsset.itemUid) : null;
+
+  const buildRunRequestCatalog = useCallback(async (flow) => {
+    if (!executionCollection) return [];
+    const referencedItems = new Map();
+    (flow?.nodes || []).filter((node) => REQUEST_NODE_KINDS.has(node.kind)).forEach((node) => {
+      const asset = requestCatalog.find((candidate) => (
+        candidate.item?.uid === node.requestRef?.expectedItemUid
+        || candidate.itemPathname === node.requestRef?.itemPathname
+      ));
+      if (asset?.item?.uid) referencedItems.set(asset.item.uid, asset.item);
+    });
+    const promptNames = [...referencedItems.values()].flatMap((item) => (
+      getPromptVariableNamesForRequest(item, executionCollection)
+    ));
+    const promptVariables = await promptForRequestVariables(promptNames);
+    const promptedCollection = cloneDeep(executionCollection);
+    promptedCollection.promptVariables = promptVariables || {};
+    return buildFlowRequestCatalog(promptedCollection);
+  }, [executionCollection, requestCatalog]);
 
   useEffect(() => {
     if (catalog.status === 'idle') {
-      dispatch(openWorkspaceFlowCatalog({ workspaceUid: workspace.uid, workspacePath: workspace.pathname }));
+      dispatch(openWorkspaceFlowCatalog({ workspaceUid: scopeUid, workspacePath: scopePath }));
     }
-  }, [catalog.status, dispatch, workspace.uid, workspace.pathname]);
+  }, [catalog.status, dispatch, scopeUid, scopePath]);
 
   const openFlow = useCallback(async (entry, options = {}) => {
     if (!entry?.relativePath) return null;
     setLoadingFlow(true);
     try {
-      const nextRecord = await dispatch(readFlowFile({ workspacePath: workspace.pathname, relativePath: entry.relativePath }));
+      const nextRecord = await dispatch(readFlowFile({ workspacePath: scopePath, relativePath: entry.relativePath }));
       setRecord(nextRecord);
       editor.load(nextRecord.flow, { baseRevision: nextRecord.flow.revision, dirty: Boolean(options.dirty) });
       setRunInputs(inputDefaults(nextRecord.flow));
+      setActiveCaseId('');
+      setRunHistory([]);
       dispatchRuntime({ type: 'reset', flowUid: nextRecord.flow.uid });
       setPreview(null);
       setPreviewError(null);
@@ -215,7 +294,7 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } finally {
       setLoadingFlow(false);
     }
-  }, [dispatch, editor.load, refreshCheckpoints, workspace.pathname]);
+  }, [dispatch, editor.load, refreshCheckpoints, scopePath]);
 
   useEffect(() => {
     if (!record && !loadingFlow) {
@@ -242,17 +321,19 @@ const FlowStudioWorkspace = ({ workspace }) => {
     let relativePath = `${base}.flow.yml`;
     let suffix = 2;
     while (usedPaths.has(relativePath)) relativePath = `${base}-${suffix++}.flow.yml`;
-    const flow = createAuthoringFlow({ uid: createEntityId('flow'), name, workspaceUid: workspace.uid });
+    const flow = createAuthoringFlow({ uid: createEntityId('flow'), name, workspaceUid: workspace?.uid || scopeUid });
     try {
       const nextRecord = await dispatch(createFlowFile({
-        workspaceUid: workspace.uid,
-        workspacePath: workspace.pathname,
+        workspaceUid: scopeUid,
+        workspacePath: scopePath,
         relativePath,
         flow
       }));
       setRecord(nextRecord);
       editor.load(nextRecord.flow, { baseRevision: nextRecord.flow.revision });
       setRunInputs(inputDefaults(nextRecord.flow));
+      setActiveCaseId('');
+      setRunHistory([]);
       dispatchRuntime({ type: 'reset', flowUid: nextRecord.flow.uid });
       setPreview(null);
       setPreviewError(null);
@@ -264,7 +345,49 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } catch (error) {
       toast.error(error.message || 'Unable to create flow');
     }
-  }, [newFlowName, flowEntries, workspace.uid, workspace.pathname, dispatch, editor.load, refreshCheckpoints]);
+  }, [newFlowName, flowEntries, workspace?.uid, scopeUid, scopePath, dispatch, editor.load, refreshCheckpoints]);
+
+  useEffect(() => {
+    if (activeCaseId && !dataCases.some((dataCase) => dataCase.id === activeCaseId)) {
+      setActiveCaseId('');
+    }
+  }, [activeCaseId, dataCases]);
+
+  const changeDataCase = useCallback((caseId) => {
+    setActiveCaseId(caseId);
+    const dataCase = dataCases.find((candidate) => candidate.id === caseId);
+    setRunInputs(dataCase ? { ...inputDefaults(editor.flow), ...dataCase.values } : inputDefaults(editor.flow));
+  }, [dataCases, editor.flow]);
+
+  const createDataCase = useCallback(() => {
+    if (!editor.flow) return;
+    const nextName = `Case ${dataCases.length + 1}`;
+    const next = upsertFlowDataCase(editor.flow, { name: nextName, values: runInputs });
+    const created = getFlowDataCases(next).at(-1);
+    editor.commit(next, {});
+    setActiveCaseId(created?.id || '');
+    toast.success(`${nextName} created`);
+  }, [dataCases.length, editor, runInputs]);
+
+  const updateDataCase = useCallback(() => {
+    if (!editor.flow || !activeDataCase) return;
+    editor.commit(upsertFlowDataCase(editor.flow, { ...activeDataCase, values: runInputs }), {});
+    toast.success(`${activeDataCase.name} updated`);
+  }, [activeDataCase, editor, runInputs]);
+
+  const renameDataCase = useCallback((name) => {
+    const nextName = String(name || '').trim();
+    if (!editor.flow || !activeDataCase || !nextName || nextName === activeDataCase.name) return;
+    editor.commit(upsertFlowDataCase(editor.flow, { ...activeDataCase, name: nextName }), {});
+  }, [activeDataCase, editor]);
+
+  const deleteDataCase = useCallback(() => {
+    if (!editor.flow || !activeDataCase) return;
+    editor.commit(removeFlowDataCase(editor.flow, activeDataCase.id), {});
+    setActiveCaseId('');
+    setRunInputs(inputDefaults(editor.flow));
+    toast.success(`${activeDataCase.name} deleted`);
+  }, [activeDataCase, editor]);
 
   const save = useCallback(async () => {
     if (!record || !editor.flow || saving) return;
@@ -277,8 +400,8 @@ const FlowStudioWorkspace = ({ workspace }) => {
     setSaving(true);
     try {
       const nextRecord = await dispatch(saveFlowFile({
-        workspaceUid: workspace.uid,
-        workspacePath: workspace.pathname,
+        workspaceUid: scopeUid,
+        workspacePath: scopePath,
         relativePath: record.relativePath,
         flow: editor.flow,
         expectedRevision: editor.baseRevision
@@ -288,8 +411,8 @@ const FlowStudioWorkspace = ({ workspace }) => {
       setExternalChange(null);
       if (draftRecovery?.draftUid) {
         await dispatch(discardFlowDraft({
-          workspaceUid: workspace.uid,
-          workspacePath: workspace.pathname,
+          workspaceUid: scopeUid,
+          workspacePath: scopePath,
           flowUid: nextRecord.flow.uid,
           draftUid: draftRecovery.draftUid
         })).catch(() => null);
@@ -305,15 +428,15 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } finally {
       setSaving(false);
     }
-  }, [record, editor, saving, dispatch, workspace.uid, workspace.pathname, draftRecovery]);
+  }, [record, editor, saving, dispatch, scopeUid, scopePath, draftRecovery]);
 
   useEffect(() => {
     clearTimeout(draftTimerRef.current);
     if (!record || !editor.flow || !editor.dirty || saving) return undefined;
     draftTimerRef.current = setTimeout(() => {
       dispatch(saveFlowDraft({
-        workspaceUid: workspace.uid,
-        workspacePath: workspace.pathname,
+        workspaceUid: scopeUid,
+        workspacePath: scopePath,
         flowUid: editor.flow.uid,
         relativePath: record.relativePath,
         baseRevision: editor.baseRevision,
@@ -321,14 +444,14 @@ const FlowStudioWorkspace = ({ workspace }) => {
       })).catch(() => null);
     }, 900);
     return () => clearTimeout(draftTimerRef.current);
-  }, [record, editor.flow, editor.dirty, editor.baseRevision, saving, dispatch, workspace.uid, workspace.pathname]);
+  }, [record, editor.flow, editor.dirty, editor.baseRevision, saving, dispatch, scopeUid, scopePath]);
 
   const recoverDraft = useCallback(async () => {
     if (!draftRecovery?.draftUid) return;
     try {
       const recovery = await dispatch(recoverFlowDraft({
-        workspaceUid: workspace.uid,
-        workspacePath: workspace.pathname,
+        workspaceUid: scopeUid,
+        workspacePath: scopePath,
         draftUid: draftRecovery.draftUid
       }));
       editor.load(recovery.draft.flow, { baseRevision: recovery.draft.baseRevision, dirty: true });
@@ -337,14 +460,14 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } catch (error) {
       toast.error(error.message || 'Unable to recover draft');
     }
-  }, [draftRecovery, dispatch, workspace.uid, workspace.pathname, editor.load]);
+  }, [draftRecovery, dispatch, scopeUid, scopePath, editor.load]);
 
   const applyDraft = useCallback(async () => {
     if (!draftRecovery?.draftUid || !activeFlowUid) return;
     try {
       const nextRecord = await dispatch(applyFlowDraft({
-        workspaceUid: workspace.uid,
-        workspacePath: workspace.pathname,
+        workspaceUid: scopeUid,
+        workspacePath: scopePath,
         flowUid: activeFlowUid,
         draftUid: draftRecovery.draftUid
       }));
@@ -354,17 +477,17 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } catch (error) {
       toast.error(error.message || 'Draft conflicts with the current file');
     }
-  }, [draftRecovery, activeFlowUid, dispatch, workspace.uid, workspace.pathname, editor.markSaved]);
+  }, [draftRecovery, activeFlowUid, dispatch, scopeUid, scopePath, editor.markSaved]);
 
   const discardDraft = useCallback(async () => {
     if (!draftRecovery?.draftUid || !activeFlowUid) return;
     await dispatch(discardFlowDraft({
-      workspaceUid: workspace.uid,
-      workspacePath: workspace.pathname,
+      workspaceUid: scopeUid,
+      workspacePath: scopePath,
       flowUid: activeFlowUid,
       draftUid: draftRecovery.draftUid
     }));
-  }, [draftRecovery, activeFlowUid, dispatch, workspace.uid, workspace.pathname]);
+  }, [draftRecovery, activeFlowUid, dispatch, scopeUid, scopePath]);
 
   const deleteSelected = useCallback(() => {
     if (!editor.flow || !hasSelection) return;
@@ -390,7 +513,7 @@ const FlowStudioWorkspace = ({ workspace }) => {
     const frame = next.frames[next.frames.length - 1];
     editor.commit(next, { frameIds: [frame.id] });
     setSelection({ ...emptySelection(), frameIds: [frame.id], focusNonce: Date.now() });
-  }, [editor]);
+  }, [editor, flowClipboard]);
 
   useEffect(() => {
     const removeRuntimeListener = window.ipcRenderer?.on?.('main:flow-runtime-event', (event) => {
@@ -424,14 +547,14 @@ const FlowStudioWorkspace = ({ workspace }) => {
     window.addEventListener('error', onWindowError);
     window.addEventListener('unhandledrejection', onUnhandledRejection);
     flowDebug('renderer:diagnostics-attached', {
-      workspaceUid: workspace.uid,
-      workspacePath: workspace.pathname
+      collectionUid: scopeUid,
+      collectionPath: scopePath
     });
     return () => {
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
     };
-  }, [workspace.pathname, workspace.uid]);
+  }, [scopePath, scopeUid]);
 
   const runActiveFlow = useCallback(async () => {
     flowDebug('run:click', {
@@ -467,11 +590,13 @@ const FlowStudioWorkspace = ({ workspace }) => {
     dispatchRuntime({ type: 'reset', runId, flowUid: editor.flow.uid });
     flowDebug('run:ipc-dispatch', { runId, flowUid: editor.flow.uid });
     try {
+      const executionCatalog = await buildRunRequestCatalog(editor.flow);
       const result = await dispatch(runFlow({
         runId,
         flow: editor.flow,
-        workspacePath: workspace.pathname,
-        requestCatalog,
+        workspacePath: scopePath,
+        workspaceContext: workspace ? { uid: workspace.uid, pathname: workspace.pathname } : null,
+        requestCatalog: executionCatalog,
         inputs: runInputs,
         environmentValues
       }));
@@ -486,6 +611,13 @@ const FlowStudioWorkspace = ({ workspace }) => {
         error: result?.error
       });
       dispatchRuntime({ type: 'result', result });
+      setRunHistory((current) => [{
+        ...result,
+        dataCaseId: activeCaseId || null,
+        dataCaseName: activeDataCase?.name || 'Live inputs',
+        inputs: cloneDeep(runInputs),
+        completedAt: new Date().toISOString()
+      }, ...current.filter((entry) => entry.runId !== result.runId)].slice(0, 20));
       if (result.status === 'paused') await refreshCheckpoints(editor.flow.uid);
       if (result.status === 'failed') toast.error(result.error?.message || 'Flow run failed');
     } catch (error) {
@@ -498,19 +630,21 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } finally {
       flowDebug('run:finished-renderer', { runId });
     }
-  }, [editor, runtime.status, dispatch, workspace.pathname, requestCatalog, runInputs, environmentValues, refreshCheckpoints]);
+  }, [editor, runtime.status, dispatch, scopePath, workspace, requestCatalog, runInputs, environmentValues, refreshCheckpoints, buildRunRequestCatalog, activeCaseId, activeDataCase?.name]);
 
   const resumeActiveFlow = useCallback(async (checkpointId) => {
     if (!editor.flow || !checkpointId || runtime.status === 'running' || runtime.status === 'queued') return;
     const runId = createEntityId('run');
     dispatchRuntime({ type: 'reset', runId, flowUid: editor.flow.uid });
     try {
+      const executionCatalog = await buildRunRequestCatalog(editor.flow);
       const result = await dispatch(resumeFlow({
         runId,
         checkpointId,
         flow: editor.flow,
-        workspacePath: workspace.pathname,
-        requestCatalog,
+        workspacePath: scopePath,
+        workspaceContext: workspace ? { uid: workspace.uid, pathname: workspace.pathname } : null,
+        requestCatalog: executionCatalog,
         inputs: runInputs,
         environmentValues
       }));
@@ -521,13 +655,13 @@ const FlowStudioWorkspace = ({ workspace }) => {
       dispatchRuntime({ type: 'result', result: { runId, status: 'failed', error: { message: error.message || 'Flow resume failed' } } });
       toast.error(error.message || 'Flow resume failed');
     }
-  }, [dispatch, editor.flow, environmentValues, refreshCheckpoints, requestCatalog, runInputs, runtime.status, workspace.pathname]);
+  }, [dispatch, editor.flow, environmentValues, refreshCheckpoints, requestCatalog, runInputs, runtime.status, scopePath, workspace, buildRunRequestCatalog]);
 
   const removeCheckpoint = useCallback(async (checkpointId) => {
     if (!editor.flow || !checkpointId) return;
     try {
       await dispatch(deleteFlowCheckpoint({
-        workspacePath: workspace.pathname,
+        workspacePath: scopePath,
         flowUid: editor.flow.uid,
         checkpointId
       }));
@@ -535,7 +669,7 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } catch (error) {
       toast.error(error.message || 'Unable to delete checkpoint');
     }
-  }, [dispatch, editor.flow, refreshCheckpoints, workspace.pathname]);
+  }, [dispatch, editor.flow, refreshCheckpoints, scopePath]);
 
   const cancelActiveRun = useCallback(async () => {
     if (!runtime.runId) return;
@@ -554,6 +688,7 @@ const FlowStudioWorkspace = ({ workspace }) => {
       const resolved = await dispatch(previewFlowRequest({
         flow: editor.flow,
         nodeId: selectedRequestNode.id,
+        workspacePath: scopePath,
         requestCatalog,
         inputs: runInputs,
         environmentValues
@@ -565,7 +700,7 @@ const FlowStudioWorkspace = ({ workspace }) => {
     } finally {
       setPreviewing(false);
     }
-  }, [dispatch, editor.flow, selectedRequestNode, requestCatalog, runInputs, environmentValues]);
+  }, [dispatch, editor.flow, selectedRequestNode, scopePath, requestCatalog, runInputs, environmentValues]);
 
   useEffect(() => {
     if (!selectedRequestNode) {
@@ -576,6 +711,29 @@ const FlowStudioWorkspace = ({ workspace }) => {
     const timer = setTimeout(resolveSelectedPreview, 220);
     return () => clearTimeout(timer);
   }, [selectedRequestNode?.id, runInputs, environmentValues, resolveSelectedPreview]);
+
+  const copySelected = useCallback(() => {
+    if (!editor.flow) return;
+    const clipboard = createFlowClipboard(editor.flow, selection);
+    if (!clipboard.nodes.length && !clipboard.frames.length) return;
+    setFlowClipboard(clipboard);
+    toast.success(`Copied ${clipboard.nodes.length + clipboard.frames.length} item(s)`);
+  }, [editor.flow, selection]);
+
+  const pasteCopied = useCallback(() => {
+    if (!editor.flow || !flowClipboard) return;
+    const pasted = pasteFlowClipboard(editor.flow, flowClipboard);
+    if (pasted.flow === editor.flow || !pasted.selection) return;
+    editor.commit(pasted.flow, { topology: true, ...pasted.selection });
+    setSelection({ ...emptySelection(), ...pasted.selection, focusNonce: Date.now() });
+  }, [editor, flowClipboard]);
+
+  const autoLayout = useCallback(() => {
+    if (!editor.flow) return;
+    const next = autoLayoutFlow(editor.flow);
+    if (next === editor.flow) return;
+    editor.commit(next, { topology: true, nodeIds: next.nodes.map((node) => node.id) });
+  }, [editor]);
 
   const focusSearchResult = useCallback(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -599,6 +757,12 @@ const FlowStudioWorkspace = ({ workspace }) => {
       } else if ((modifier && event.shiftKey && key === 'z') || (modifier && key === 'y')) {
         event.preventDefault();
         editor.redo();
+      } else if (modifier && key === 'c' && !isEditableTarget(event.target)) {
+        event.preventDefault();
+        copySelected();
+      } else if (modifier && key === 'v' && !isEditableTarget(event.target)) {
+        event.preventDefault();
+        pasteCopied();
       } else if (modifier && key === 'f') {
         event.preventDefault();
         searchInputRef.current?.focus();
@@ -618,9 +782,9 @@ const FlowStudioWorkspace = ({ workspace }) => {
       window.removeEventListener('flow-studio-save', handleSaveEvent);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [save, editor.undo, editor.redo, focusSearchResult, deleteSelected]);
+  }, [save, editor.undo, editor.redo, focusSearchResult, deleteSelected, copySelected, pasteCopied]);
 
-  if (!workspace?.pathname) return <div className="flow-studio-loading">Workspace path is unavailable.</div>;
+  if (!scopePath) return <div className="flow-studio-loading">Collection path is unavailable.</div>;
 
   return (
     <div className="flow-studio-workspace" data-testid="flow-studio-workspace">
@@ -636,6 +800,17 @@ const FlowStudioWorkspace = ({ workspace }) => {
       />
 
       <div className="flow-authoring-shell">
+        <div className="flow-suite-header">
+          <div className="flow-suite-header-copy">
+            <strong>Flow Studio</strong>
+            <span>Connect canonical Bruno HTTP and GraphQL requests. Variables, auth, scripts, tests, cookies and networking behave exactly like normal Send.</span>
+          </div>
+          <div className="flow-suite-context">
+            <span className="flow-suite-context-chip" title={collection.name}>{collection.name}</span>
+            {activeGlobalEnvironment && <span className="flow-suite-context-chip" title={activeGlobalEnvironment.name}>Global · {activeGlobalEnvironment.name}</span>}
+            <EnvironmentSelector collection={collection} />
+          </div>
+        </div>
         <Toolbar
           flow={editor.flow}
           dirty={editor.dirty}
@@ -653,11 +828,23 @@ const FlowStudioWorkspace = ({ workspace }) => {
           onAddFrame={addFrame}
           onGroup={groupSelected}
           onDelete={deleteSelected}
+          onCopy={copySelected}
+          onPaste={pasteCopied}
+          onAutoLayout={autoLayout}
+          canCopy={selection.nodeIds.length > 0 || selection.frameIds.length > 0}
+          canPaste={Boolean(flowClipboard)}
           canGroup={selection.nodeIds.length > 0}
           canDelete={hasSelection}
           runStatus={runtime.status}
           onRun={runActiveFlow}
           onCancel={cancelActiveRun}
+          dataCases={dataCases}
+          activeCaseId={activeCaseId}
+          onCaseChange={changeDataCase}
+          onCreateCase={createDataCase}
+          onUpdateCase={updateDataCase}
+          onRenameCase={renameDataCase}
+          onDeleteCase={deleteDataCase}
         />
 
         {(externalChange || showDraftRecovery) && (
@@ -678,13 +865,15 @@ const FlowStudioWorkspace = ({ workspace }) => {
         <div className="flow-editor-layout">
           <AssetsPanel
             requestAssets={requestAssets}
+            reusableFlowAssets={reusableFlowAssets}
+            collectionName={collection.name}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
             searchInputRef={null}
           />
           <main className="flow-canvas-region">
             {loadingFlow && <div className="flow-canvas-overlay">Loading flow…</div>}
-            {!editor.flow && !loadingFlow && <div className="flow-empty-canvas"><IconFilePlus size={28} /><strong>Create or open a flow</strong><span>Then drag requests and inputs onto the canvas.</span></div>}
+            {!editor.flow && !loadingFlow && <div className="flow-empty-canvas"><IconFilePlus size={28} /><strong>Create or open a flow</strong><span>Then connect requests and map response values into Bruno runtime variables.</span></div>}
             {editor.flow && (
               <ReactFlowProvider>
                 <FlowCanvas
@@ -697,13 +886,29 @@ const FlowStudioWorkspace = ({ workspace }) => {
                   onReplace={editor.replace}
                   onProjectionMeasured={setProjectionMs}
                   runtimeProjection={runtime}
+                  requestAssets={requestAssets}
                 />
               </ReactFlowProvider>
             )}
           </main>
-          {editor.flow
-            ? <Inspector flow={editor.flow} selection={selection} validation={editor.validation} onCommit={editor.commit} />
-            : <aside className="flow-inspector"><div className="flow-panel-heading">Inspector</div></aside>}
+          {editor.flow ? (
+            <Inspector
+              flow={editor.flow}
+              selection={selection}
+              validation={editor.validation}
+              onCommit={editor.commit}
+              requestAsset={selectedRequestAsset}
+              requestItem={selectedRequestItem}
+              environmentName={activeEnvironmentName}
+              preview={preview}
+              previewError={previewError}
+              previewing={previewing}
+              onPreview={resolveSelectedPreview}
+              runtimeNode={selectedRequestNode ? runtime.nodes?.[selectedRequestNode.id] : null}
+            />
+          ) : (
+            <aside className="flow-inspector"><div className="flow-panel-heading">Inspector</div></aside>
+          )}
         </div>
         <RunConsole
           flow={editor.flow}
@@ -720,6 +925,8 @@ const FlowStudioWorkspace = ({ workspace }) => {
           preview={preview}
           previewError={previewError}
           previewing={previewing}
+          runHistory={runHistory}
+          activeCaseName={activeDataCase?.name || 'Live inputs'}
         />
       </div>
     </div>

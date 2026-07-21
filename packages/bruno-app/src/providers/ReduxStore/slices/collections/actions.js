@@ -552,75 +552,50 @@ export const wsConnectOnly = (item, collectionUid) => (dispatch, getState) => {
 };
 
 /**
- * Extract prompt variables from a request, collection, and environment variables.
- * Tries to respect the hierarchy of the variables and avoid unnecessary prompts as much as possible
- *
- * @param {*} item
- * @param {*} collection
- * @returns {Promise<Object>} A promise that resolves with the prompt variables or null if no prompt variables are found
+ * Returns the prompt-variable names used by one normal Bruno request.
+ * Flow Studio reuses this helper so request execution has the same prompt behavior as Send.
  */
-const extractPromptVariablesForRequest = async (item, collection) => {
-  return new Promise(async (resolve, reject) => {
-    // Ensure window contains promptForVariables function
-    if (typeof window === 'undefined' || typeof window.promptForVariables !== 'function') {
-      console.error('Failed to initialize prompt variables: window.promptForVariables is not available. '
-        + 'This may indicate an initialization issue with the app environment.');
-      return resolve(null);
-    }
+export const getPromptVariableNamesForRequest = (item, collection) => {
+  const prompts = [];
+  const request = item.draft?.request ?? item.request ?? {};
+  const allVariables = getAllVariables(collection, item);
+  const clientCertConfig = get(collection, 'brunoConfig.clientCertificates.certs', []);
+  const requestTreePath = getTreePathFromCollectionToItem(collection, item);
+  const headers = mergeHeaders(collection, request, requestTreePath);
+  const resolvedAuthRequest = request.auth?.mode
+    ? resolveInheritedAuth(item, collection)
+    : { ...request, auth: { mode: 'none' } };
 
-    const prompts = [];
-    const request = item.draft?.request ?? item.request ?? {};
-    const allVariables = getAllVariables(collection, item);
-    const clientCertConfig = get(collection, 'brunoConfig.clientCertificates.certs', []);
-    const requestTreePath = getTreePathFromCollectionToItem(collection, item);
-    // Get active headers from collection, folders, and request by priority order
-    const headers = mergeHeaders(collection, request, requestTreePath);
-    // Get request auth or inherited auth
-    const resolvedAuthRequest = resolveInheritedAuth(item, collection);
+  for (const clientCert of clientCertConfig) {
+    const domain = interpolateUrl({ url: clientCert?.domain, variables: allVariables });
+    if (!domain) continue;
+    const hostRegex = '^(https:\\/\\/|grpc:\\/\\/|grpcs:\\/\\/)?' + domain.replaceAll('.', '\\.').replaceAll('*', '.*');
+    const requestUrl = interpolateUrl({ url: request.url, variables: allVariables });
+    if (requestUrl.match(hostRegex)) prompts.push(...extractPromptVariables(clientCert));
+  }
 
-    for (let clientCert of clientCertConfig) {
-      const domain = interpolateUrl({ url: clientCert?.domain, variables: allVariables });
-
-      if (domain) {
-        const hostRegex = '^(https:\\/\\/|grpc:\\/\\/|grpcs:\\/\\/)?' + domain.replaceAll('.', '\\.').replaceAll('*', '.*');
-        const requestUrl = interpolateUrl({ url: request.url, variables: allVariables });
-        if (requestUrl.match(hostRegex)) {
-          prompts.push(...extractPromptVariables(clientCert));
-        }
-      }
-    }
-
-    // Attempt to extract unique prompt variables from anywhere in the request and environment variables.
-    prompts.push(...extractPromptVariables(allVariables));
-    prompts.push(...extractPromptVariables(request.body?.[request.body.mode]));
-    prompts.push(...extractPromptVariables(headers));
-    prompts.push(...extractPromptVariables(request.params));
-    prompts.push(...extractPromptVariables(resolvedAuthRequest.auth));
-    prompts.push(...extractPromptVariables(request.url));
-
-    // Remove duplicates
-    const uniquePrompts = Array.from(new Set(prompts));
-
-    // If no prompt variables are found, return null
-    if (!uniquePrompts?.length) {
-      return resolve(null);
-    }
-
-    try {
-      // Prompt user for values if any prompt variables are found
-      const userValues = await window.promptForVariables(uniquePrompts);
-      const promptVariables = {};
-      // Populate runtimeVariables with user input for prompt variables
-      for (const prompt of uniquePrompts) {
-        promptVariables[`?${prompt}`] = userValues[prompt] ?? '';
-      }
-
-      return resolve(promptVariables);
-    } catch (error) {
-      return reject(error);
-    }
-  });
+  prompts.push(...extractPromptVariables(allVariables));
+  prompts.push(...extractPromptVariables(request.body?.[request.body.mode]));
+  prompts.push(...extractPromptVariables(headers));
+  prompts.push(...extractPromptVariables(request.params));
+  prompts.push(...extractPromptVariables(resolvedAuthRequest.auth));
+  prompts.push(...extractPromptVariables(request.url));
+  return Array.from(new Set(prompts));
 };
+
+export const promptForRequestVariables = async (promptNames = []) => {
+  const uniquePrompts = Array.from(new Set(promptNames)).filter(Boolean);
+  if (uniquePrompts.length === 0) return null;
+  if (typeof window === 'undefined' || typeof window.promptForVariables !== 'function') {
+    throw new Error('Prompt variables are unavailable in the current Bruno window');
+  }
+  const userValues = await window.promptForVariables(uniquePrompts);
+  return Object.fromEntries(uniquePrompts.map((prompt) => [`?${prompt}`, userValues[prompt] ?? '']));
+};
+
+export const extractPromptVariablesForRequest = async (item, collection) => (
+  promptForRequestVariables(getPromptVariableNamesForRequest(item, collection))
+);
 
 const recordApiObservation = ({ collection, item, response, source = 'single-run' }) => {
   if (!Number.isInteger(Number(response?.status)) || typeof window === 'undefined' || !window.ipcRenderer?.invoke) return;

@@ -1,13 +1,48 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { BrunoWorkspaceCatalog } = require('../../src/mcp/workspace-catalog');
+const { stringifyRequest } = require('@usebruno/filestore');
 const { BrunoRequestContextResolver } = require('../../src/mcp/request-context-resolver');
 const { BrunoMcpAutomationFacade } = require('../../src/mcp/automation-facade');
 
 const write = (pathname, content) => {
   fs.mkdirSync(path.dirname(pathname), { recursive: true });
   fs.writeFileSync(pathname, content);
+};
+
+const getUserRequest = {
+  uid: 'request_get_user',
+  type: 'http-request',
+  name: 'Get user',
+  seq: 1,
+  request: {
+    method: 'GET',
+    url: '{{base_url}}/{{version}}/users/{{user_id}}',
+    params: [],
+    headers: [{ uid: 'tenant_header', name: 'X-Tenant', value: '{{tenant}}', enabled: true }],
+    auth: { mode: 'none' },
+    body: { mode: 'none' },
+    script: { req: '', res: '' },
+    vars: { req: [], res: [] },
+    assertions: [],
+    tests: '',
+    docs: ''
+  },
+  settings: {},
+  examples: []
+};
+
+const createUserRequest = {
+  ...getUserRequest,
+  uid: 'request_create_user',
+  name: 'Create user',
+  seq: 2,
+  request: {
+    ...getUserRequest.request,
+    method: 'POST',
+    url: '{{base_url}}/{{version}}/users',
+    body: { mode: 'json', json: '{"name":"Ada"}' }
+  }
 };
 
 describe('Bruno MCP API runner', () => {
@@ -22,178 +57,89 @@ describe('Bruno MCP API runner', () => {
     workspacePath = path.join(root, 'workspace');
     collectionPath = path.join(workspacePath, 'collections', 'api');
     workspace = { uid: 'workspace_api', name: 'API workspace', path: workspacePath };
-    config = {
-      allowedWorkspaces: [workspace],
-      allowedHosts: ['api.test'],
-      allowPrivateHosts: false,
-      allowDynamicHosts: false,
-      requestTimeoutMs: 10_000,
-      maxRequestFiles: 100
-    };
+    config = { workspaces: [workspace], requestTimeoutMs: 10000, maxRequestFiles: 100 };
 
-    write(path.join(collectionPath, 'opencollection.yml'), `opencollection: "1.0.0"
-info:
-  name: MCP API
-
-request:
-  variables:
-    - name: tenant
-      value: acme
-`);
-    write(path.join(collectionPath, 'users', 'folder.yml'), `info:
-  name: Users
-  type: folder
-
-request:
-  variables:
-    - name: version
-      value: v1
-`);
-    write(path.join(collectionPath, 'users', 'get-user.yml'), `info:
-  name: Get user
-  type: http
-  seq: 1
-
-http:
-  method: GET
-  url: "{{base_url}}/{{version}}/users/{{user_id}}"
-  headers:
-    - name: X-Tenant
-      value: "{{tenant}}"
-      enabled: true
-`);
-    write(path.join(collectionPath, 'users', 'create-user.yml'), `info:
-  name: Create user
-  type: http
-  seq: 2
-
-http:
-  method: POST
-  url: "{{base_url}}/{{version}}/users"
-  body:
-    mode: json
-    json: |
-      {"name":"Ada"}
-`);
-    write(path.join(collectionPath, 'environments', 'Local.yml'), `name: Local
-
-variables:
-  - name: base_url
-    value: https://api.test
-`);
+    write(path.join(collectionPath, 'bruno.json'), JSON.stringify({ version: '1', name: 'MCP API', type: 'collection' }));
+    write(path.join(collectionPath, 'collection.bru'), 'vars:pre-request {\n  tenant: acme\n}\n');
+    write(path.join(collectionPath, 'users', 'folder.bru'), 'meta {\n  name: Users\n}\n\nvars:pre-request {\n  version: v1\n}\n');
+    write(path.join(collectionPath, 'users', 'get-user.bru'), stringifyRequest(getUserRequest, { format: 'bru' }));
+    write(path.join(collectionPath, 'users', 'create-user.bru'), stringifyRequest(createUserRequest, { format: 'bru' }));
+    write(path.join(collectionPath, 'environments', 'Local.bru'), 'vars {\n  base_url: https://api.test\n}\n');
   });
 
-  afterEach(() => {
-    fs.rmSync(root, { recursive: true, force: true });
-  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  it('discovers YAML requests and resolves collection, folder, environment, and runtime variables', async () => {
-    const catalog = new BrunoWorkspaceCatalog({ configProvider: () => config });
-    const requests = await catalog.listRequests(workspace, { query: 'get user' });
-    expect(requests).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'Get user',
-        method: 'GET',
-        collection_path: 'collections/api',
-        item_pathname: 'users/get-user.yml'
-      })
-    ]));
-
+  it('resolves collection, folder, environment, and runtime variables with the normal Bruno resolver', async () => {
     const resolver = new BrunoRequestContextResolver();
     const context = await resolver.resolve({
       workspace,
       collectionPath: 'collections/api',
-      itemPathname: 'users/get-user.yml',
-      input: {
-        environment_name: 'Local',
-        runtime_variables: { user_id: 'usr_42' }
-      }
+      itemPathname: 'users/get-user.bru',
+      input: { environment_name: 'Local', runtime_variables: { user_id: 'usr_42' } }
     });
 
     expect(context.preparedRequest.url).toBe('https://api.test/v1/users/usr_42');
     expect(context.preparedRequest.headers['X-Tenant']).toBe('acme');
     expect(context.environment.name).toBe('Local');
     expect(context.unresolvedVariables).toEqual([]);
-    expect(context.collection.items[0]).toEqual(expect.objectContaining({ type: 'folder', name: 'Users' }));
   });
 
-  it('runs safe methods autonomously, returns structured results, and gates side-effect methods', async () => {
+  it('runs read and mutation methods directly, keeps complete results, and supports asynchronous retrieval', async () => {
     const requestExecutionService = {
       executeWithLegacy: jest.fn(async ({ item, environmentContext, runtimeVariables, executionContext }) => {
-        await executionContext.requestGuard({
-          url: runtimeVariables.force_url || 'https://api.test/v1/users',
-          method: runtimeVariables.force_method || item.request.method
-        });
+        await executionContext.requestGuard({ url: item.request.url, method: item.request.method });
         return {
           result: {
-            executionId: `exec_${item.uid}`,
+            executionId: executionContext.executionId,
             status: 'success',
-            response: {
-              status: 200,
-              body: { access_token: 'raw-response-secret', visible: 'ok' }
-            },
-            tests: [{ name: 'status is 200', passed: true }],
+            response: { status: item.request.method === 'POST' ? 201 : 200, body: { access_token: 'raw-response-secret', visible: 'ok' } },
+            tests: [{ name: 'status', status: 'pass' }],
             assertions: []
           },
+          legacyResult: { status: 200, data: { visible: 'ok' }, headers: {} },
           environmentContext,
           runtimeVariables
         };
       })
     };
+    let id = 0;
     const facade = new BrunoMcpAutomationFacade({
-      flowPersistenceService: {},
-      flowRuntimeService: {},
       requestExecutionService,
       configProvider: () => config,
-      idFactory: () => 'correlation_api'
+      idFactory: () => `run_${++id}`
     });
 
-    const result = await facade.runRequest({
+    const getResult = await facade.runRequest({
       workspace_uid: workspace.uid,
       collection_path: 'collections/api',
-      item_pathname: 'users/get-user.yml',
+      item_pathname: 'users/get-user.bru',
       environment_name: 'Local',
       runtime_variables: { user_id: 'usr_42' }
     });
+    expect(getResult.status).toBe('success');
+    expect(getResult.result.response).toEqual({ status: 200, body: { access_token: 'raw-response-secret', visible: 'ok' } });
+    expect(getResult.legacy_result).toEqual({ status: 200, data: { visible: 'ok' }, headers: {} });
+    expect(getResult.request.prepared_request.url).toBe('https://api.test/v1/users/usr_42');
 
-    expect(result.status).toBe('success');
-    expect(result.response.status).toBe(200);
-    expect(result.response.body.visible).toBe('ok');
-    expect(result.response.body.access_token).toBe('[REDACTED]');
-    expect(result.request_context).toMatchObject({
-      method: 'GET',
-      resolved_url: 'https://api.test/v1/users/usr_42',
-      selected_environment: { name: 'Local' }
-    });
-    expect(requestExecutionService.executeWithLegacy).toHaveBeenCalledWith(expect.objectContaining({
-      environmentContext: expect.objectContaining({ name: 'Local' }),
-      runtimeVariables: { user_id: 'usr_42' },
-      executionContext: expect.objectContaining({ source: 'mcp' })
-    }));
-
-    await expect(facade.runRequest({
+    const postResult = await facade.runRequest({
       workspace_uid: workspace.uid,
       collection_path: 'collections/api',
-      item_pathname: 'users/get-user.yml',
-      environment_name: 'Local',
-      runtime_variables: { user_id: 'usr_42', force_method: 'POST' }
-    })).rejects.toMatchObject({ code: 'BRUNO_MCP_SIDE_EFFECT_APPROVAL_REQUIRED' });
-
-    await expect(facade.runRequest({
-      workspace_uid: workspace.uid,
-      collection_path: 'collections/api',
-      item_pathname: 'users/create-user.yml',
+      item_pathname: 'users/create-user.bru',
       environment_name: 'Local'
-    })).rejects.toMatchObject({ code: 'BRUNO_MCP_SIDE_EFFECT_APPROVAL_REQUIRED' });
+    });
+    expect(postResult.status).toBe('success');
+    expect(postResult.result.response.status).toBe(201);
 
-    const mutation = await facade.runRequest({
+    const started = await facade.runRequest({
       workspace_uid: workspace.uid,
       collection_path: 'collections/api',
-      item_pathname: 'users/create-user.yml',
+      item_pathname: 'users/create-user.bru',
       environment_name: 'Local',
-      allow_side_effects: true
+      wait_mode: 'start'
     });
-    expect(mutation.request_context.method).toBe('POST');
+    expect(started.status).toBe('running');
+    await facade.requestRuns.get(started.run_id).promise;
+    expect(facade.getRequestRun({ run_id: started.run_id }).result.response.status).toBe(201);
     expect(requestExecutionService.executeWithLegacy).toHaveBeenCalledTimes(3);
   });
 });

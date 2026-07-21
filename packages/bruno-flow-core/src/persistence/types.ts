@@ -17,6 +17,8 @@ export interface FlowCatalogEntry {
   revision: string | null;
   updatedAt: string | null;
   tags: string[];
+  inputSchema?: FlowDefinition['inputSchema'];
+  outputSchema?: FlowDefinition['outputSchema'];
   status: 'valid' | 'invalid';
   error?: string;
 }

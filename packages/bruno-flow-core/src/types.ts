@@ -54,7 +54,7 @@ export interface FlowRequestReference {
 
 export type FlowNodeKind = 'start' | 'end' | 'condition' | 'fork' | 'join' | 'delay' | 'subflow' | 'checkpoint' | 'fail'
   | 'http' | 'graphql' | 'websocket' | 'grpc-unary' | 'sse'
-  | 'static-input' | 'form-input' | 'environment-input' | 'dataset-input' | 'response-extractor'
+  | 'static-input' | 'form-input' | 'environment-input' | 'dataset-input' | 'dynamic-data' | 'response-extractor'
   | 'transform' | 'generator' | 'secret-reference' | 'merge' | 'set-variables';
 
 export interface FlowNode {

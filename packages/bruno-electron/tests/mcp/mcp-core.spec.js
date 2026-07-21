@@ -1,125 +1,84 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {
-  assertScope,
-  hasScope,
-  normalizePermissionProfile
-} = require('../../src/mcp/permissions');
-const { redactMcpValue, summarizeMcpArgs } = require('../../src/mcp/redaction');
-const { McpRateLimiter } = require('../../src/mcp/rate-limit');
 const { normalizeMcpConfig } = require('../../src/mcp/config');
 const { McpTokenStore } = require('../../src/mcp/token-store');
-const { McpAuditService } = require('../../src/mcp/audit-service');
 const {
-  FlowPatchPreviewStore,
-  applyFlowPatchOperations
-} = require('../../src/mcp/flow-patch');
+  applyMutation,
+  createRequestDefinition,
+  mergeValue,
+  tabPath
+} = require('../../src/mcp/collection-service');
 const { assertUrlAllowed } = require('../../src/mcp/automation-facade');
 
-const flow = () => ({
-  schemaVersion: 1,
-  uid: 'flow_patch',
-  name: 'Patch me',
-  revision: 'sha256:old',
-  workspace: { uid: 'workspace_test' },
-  defaults: {},
-  nodes: [
-    { id: 'start', semanticKey: 'start', kind: 'start', position: { x: 0, y: 0 }, config: {} },
-    { id: 'end', semanticKey: 'end', kind: 'end', position: { x: 100, y: 0 }, config: {} }
-  ],
-  controlEdges: [{ id: 'start_end', sourceNodeId: 'start', targetNodeId: 'end' }],
-  dataEdges: [],
-  frames: [],
-  metadata: { createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z' }
-});
-
-describe('Bruno MCP core security primitives', () => {
-  it('keeps Read Only distinct from execution and mutation scopes', () => {
-    expect(normalizePermissionProfile('readonly')).toBe('read-only');
-    expect(hasScope('read-only', 'bruno:flow:read')).toBe(true);
-    expect(hasScope('read-only', 'bruno:execute:flow')).toBe(false);
-    expect(() => assertScope('read-only', 'bruno:flow:write', 'bruno_apply_flow_patch')).toThrow(/cannot call/);
-    expect(hasScope('full-control', 'bruno:admin')).toBe(true);
-  });
-
-  it('tightens existing audit directory permissions and never writes raw argument values', async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bruno-mcp-audit-'));
-    fs.chmodSync(directory, 0o777);
-    const audit = new McpAuditService({ directory });
-    try {
-      await audit.append({
-        event: 'mcp.tool.completed',
-        args: summarizeMcpArgs({ flow_uid: 'flow_demo', inputs: { custom: 'raw-audit-secret' } })
-      });
-      const content = fs.readFileSync(audit.pathname, 'utf8');
-      expect(content).not.toContain('raw-audit-secret');
-      expect(fs.statSync(directory).mode & 0o777).toBe(0o700);
-      expect(fs.statSync(audit.pathname).mode & 0o777).toBe(0o600);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('redacts sensitive object keys, named header entries, known values, and error strings', () => {
-    const projected = redactMcpValue({
-      headers: [
-        { name: 'Authorization', value: 'Bearer top-secret' },
-        { name: 'Accept', value: 'application/json' }
-      ],
-      response: { body: { access_token: 'nested-secret', visible: 'ok' } },
-      error: 'request failed with top-secret'
-    }, { secrets: ['top-secret'] });
-
-    expect(projected.headers[0].value).toBe('[REDACTED]');
-    expect(projected.headers[1].value).toBe('application/json');
-    expect(projected.response.body.access_token).toBe('[REDACTED]');
-    expect(projected.error).not.toContain('top-secret');
-  });
-
-  it('stores only argument shape and safe identifiers in audit summaries', () => {
-    const summary = summarizeMcpArgs({
-      workspace_uid: 'workspace_demo',
-      flow_uid: 'flow_demo',
-      inputs: { custom: 'raw-arbitrary-secret', password: 'raw-password' },
-      operations: [{ op: 'replace', path: '/name', value: 'Confidential flow name' }]
+describe('Bruno MCP core', () => {
+  it('normalizes a local pure MCP configuration without permission or host policy fields', () => {
+    const config = normalizeMcpConfig({
+      mcp: {
+        enabled: true,
+        host: '0.0.0.0',
+        permissionProfile: 'read-only',
+        allowedHosts: ['api.test'],
+        allowedWorkspaces: [{ uid: 'workspace_api', path: '/tmp/api' }]
+      }
     });
-
-    expect(summary.workspace_uid).toBe('workspace_demo');
-    expect(summary.flow_uid).toBe('flow_demo');
-    expect(JSON.stringify(summary)).not.toContain('raw-arbitrary-secret');
-    expect(JSON.stringify(summary)).not.toContain('raw-password');
-    expect(JSON.stringify(summary)).not.toContain('Confidential flow name');
-    expect(summary.inputs.custom).toBe('[STRING:20]');
-    expect(summary.inputs.password).toBe('[REDACTED]');
+    expect(config).toMatchObject({ enabled: true, host: '127.0.0.1', workspaces: [{ uid: 'workspace_api', path: path.resolve('/tmp/api') }] });
+    expect(config).not.toHaveProperty('permissionProfile');
+    expect(config).not.toHaveProperty('allowedHosts');
+    expect(config).not.toHaveProperty('allowPrivateHosts');
   });
 
-  it('rate limits per client without sharing counters', () => {
-    let now = 1000;
-    const limiter = new McpRateLimiter({ limit: 2, windowMs: 1000, now: () => now });
-    expect(limiter.consume('client-a').remaining).toBe(1);
-    expect(limiter.consume('client-a').remaining).toBe(0);
-    expect(() => limiter.consume('client-a')).toThrow(/rate limit exceeded/);
-    expect(limiter.consume('client-b').remaining).toBe(1);
-    now = 2001;
-    expect(limiter.consume('client-a').remaining).toBe(1);
+  it('uses configured workspace paths for discovery rather than authorization', () => {
+    const config = normalizeMcpConfig({ mcp: { workspaces: ['/tmp/one', { name: 'Two', path: '/tmp/two' }] } });
+    expect(config.workspaces).toEqual([
+      expect.objectContaining({ name: 'one', path: path.resolve('/tmp/one') }),
+      expect.objectContaining({ name: 'Two', path: path.resolve('/tmp/two') })
+    ]);
   });
 
-  it('enforces loopback binding unless remote access is explicitly enabled', () => {
-    expect(normalizeMcpConfig({ mcp: { enabled: true } })).toMatchObject({ host: '127.0.0.1', allowRemote: false, permissionProfile: 'read-only' });
-    expect(() => normalizeMcpConfig({ mcp: { host: '0.0.0.0', allowRemote: false } })).toThrow(/loopback/);
-    expect(normalizeMcpConfig({ mcp: { host: '0.0.0.0', allowRemote: true } }).host).toBe('0.0.0.0');
+  it('does not gate dynamic, private, or mutation request URLs', () => {
+    expect(() => assertUrlAllowed('{{baseUrl}}/users', {})).not.toThrow();
+    expect(() => assertUrlAllowed('http://127.0.0.1/admin', {})).not.toThrow();
+    expect(() => assertUrlAllowed('https://metadata.google.internal', {})).not.toThrow();
   });
 
-  it('treats templated request hosts as dynamic before URL parsing', () => {
-    const config = { allowedHosts: ['api.test'], allowPrivateHosts: false, allowDynamicHosts: false };
-    expect(() => assertUrlAllowed('{{baseUrl}}/users', config)).toThrow(/Dynamic request hosts are disabled/);
-    expect(() => assertUrlAllowed('${BASE_URL}/users', config)).toThrow(/Dynamic request hosts are disabled/);
-    expect(() => assertUrlAllowed('https://api.test/users', config)).not.toThrow();
-    expect(() => assertUrlAllowed('{{baseUrl}}/users', { ...config, allowDynamicHosts: true })).not.toThrow();
+  it('deep-merges objects, replaces arrays, and supports universal set/unset editing', () => {
+    const original = {
+      name: 'Request',
+      request: {
+        headers: [{ name: 'Accept', value: 'application/json' }],
+        vars: { req: [{ name: 'old', value: '1' }], res: [] },
+        auth: { mode: 'none' }
+      }
+    };
+    const merged = mergeValue(original, { request: { auth: { mode: 'bearer', bearer: { token: 'abc' } }, headers: [] } });
+    expect(merged.request.auth).toEqual({ mode: 'bearer', bearer: { token: 'abc' } });
+    expect(merged.request.headers).toEqual([]);
+    expect(original.request.headers).toHaveLength(1);
+
+    const edited = applyMutation(merged, {
+      set: { 'request.vars.req': [{ name: 'current', value: '2' }], 'settings.timeout': 5000 },
+      unset: ['request.auth.bearer']
+    });
+    expect(edited.request.vars.req).toEqual([{ name: 'current', value: '2' }]);
+    expect(edited.settings.timeout).toBe(5000);
+    expect(edited.request.auth).toEqual({ mode: 'bearer' });
   });
 
-  it('stores a 256-bit token encrypted with private file permissions and rotates it', async () => {
+  it('creates defaults for every Bruno protocol and maps current request tabs', () => {
+    expect(createRequestDefinition({ name: 'HTTP' })).toMatchObject({ type: 'http-request', request: { body: { mode: 'none' } } });
+    expect(createRequestDefinition({ name: 'GraphQL', type: 'graphql' })).toMatchObject({ type: 'graphql-request', request: { body: { mode: 'graphql', graphql: { query: '', variables: '' } } } });
+    expect(createRequestDefinition({ name: 'gRPC', type: 'grpc' })).toMatchObject({ type: 'grpc-request', request: { body: { mode: 'grpc' } } });
+    expect(createRequestDefinition({ name: 'WebSocket', type: 'ws' })).toMatchObject({ type: 'ws-request', request: { body: { mode: 'ws' } } });
+    expect(createRequestDefinition({ name: 'SSE endpoint', type: 'sse' })).toMatchObject({ type: 'http-request', request: { method: 'GET', body: { mode: 'none' } } });
+    expect(tabPath('http-request', 'params')).toBe('request.params');
+    expect(tabPath('graphql-request', 'query')).toBe('request.body.graphql');
+    expect(tabPath('grpc-request', 'message')).toBe('request.body.grpc');
+    expect(tabPath('ws-request', 'message')).toBe('request.body.ws');
+    expect(tabPath('http-request', 'settings')).toBe('$settings');
+  });
+
+  it('stores a 256-bit bearer token encrypted with private file permissions and rotates it', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bruno-mcp-token-'));
     const encode = (value) => `enc:${Buffer.from(value).toString('base64')}`;
     const decodeSafe = (value) => ({ success: value.startsWith('enc:'), value: Buffer.from(value.slice(4), 'base64').toString() });
@@ -135,50 +94,5 @@ describe('Bruno MCP core security primitives', () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
-  });
-
-  it('applies bounded JSON pointer patches but protects identity and revision fields', () => {
-    const patched = applyFlowPatchOperations(flow(), [{ op: 'replace', path: '/name', value: 'Patched' }]);
-    expect(patched.name).toBe('Patched');
-    expect(flow().name).toBe('Patch me');
-    expect(() => applyFlowPatchOperations(flow(), [{ op: 'replace', path: '/revision', value: 'forged' }])).toThrow(/protected path/);
-    expect(() => applyFlowPatchOperations(flow(), [{ op: 'remove', path: '/missing' }])).toThrow(/does not exist/);
-  });
-
-  it('binds apply to the exact previewed operations and consumes approvals once', () => {
-    const previews = new FlowPatchPreviewStore({ idFactory: () => 'preview_1', now: () => 1000 });
-    const operations = [{ op: 'replace', path: '/name', value: 'Patched' }];
-    previews.create({
-      workspaceUid: 'workspace_test',
-      flowUid: 'flow_patch',
-      relativePath: 'patch.flow.yml',
-      expectedRevision: 'sha256:old',
-      operations,
-      proposedRevision: 'sha256:new'
-    });
-    expect(() => previews.consume({
-      previewId: 'preview_1',
-      workspaceUid: 'workspace_test',
-      flowUid: 'flow_patch',
-      relativePath: 'patch.flow.yml',
-      expectedRevision: 'sha256:old',
-      operations: [{ ...operations[0], value: 'Different' }]
-    })).toThrow(/does not match/);
-    expect(previews.consume({
-      previewId: 'preview_1',
-      workspaceUid: 'workspace_test',
-      flowUid: 'flow_patch',
-      relativePath: 'patch.flow.yml',
-      expectedRevision: 'sha256:old',
-      operations
-    })).toMatchObject({ previewId: 'preview_1' });
-    expect(() => previews.consume({
-      previewId: 'preview_1',
-      workspaceUid: 'workspace_test',
-      flowUid: 'flow_patch',
-      relativePath: 'patch.flow.yml',
-      expectedRevision: 'sha256:old',
-      operations
-    })).toThrow(/missing or expired/);
   });
 });

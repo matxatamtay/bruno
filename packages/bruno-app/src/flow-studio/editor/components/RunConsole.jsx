@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { IconPlayerPlay, IconPlayerStop, IconRefresh, IconRotateClockwise, IconTrash } from '@tabler/icons';
+import DataTree from './DataTree';
 
 const safeStringify = (value) => {
   try {
@@ -12,6 +13,16 @@ const safeStringify = (value) => {
 const InputField = ({ name, definition = {}, value, onChange }) => {
   const type = definition.type || 'string';
   const label = definition.title || name;
+  if (Array.isArray(definition.enum) && definition.enum.length > 0) {
+    return (
+      <label className="flow-run-input">
+        <span>{label}</span>
+        <select value={value ?? ''} onChange={(event) => onChange(event.target.value)}>
+          {definition.enum.map((option) => <option key={String(option)} value={option}>{String(option)}</option>)}
+        </select>
+      </label>
+    );
+  }
   if (type === 'boolean') {
     return (
       <label className="flow-run-input flow-run-checkbox">
@@ -54,19 +65,31 @@ const RunConsole = ({
   selectedRequestNode,
   preview,
   previewError,
-  previewing
+  previewing,
+  runHistory = [],
+  activeCaseName = 'Live inputs'
 }) => {
   const properties = flow?.inputSchema?.properties || {};
   const running = runtime.status === 'queued' || runtime.status === 'running';
   const selectedPreview = selectedRequestNode ? runtime.nodes?.[selectedRequestNode.id]?.preview : null;
   const displayedPreview = selectedPreview || preview;
+  const [selectedRunId, setSelectedRunId] = useState('');
+  useEffect(() => {
+    if (runtime.runId) setSelectedRunId(runtime.runId);
+  }, [runtime.runId]);
+  const selectedHistoryRun = useMemo(() => runHistory.find((entry) => entry.runId === selectedRunId) || null, [runHistory, selectedRunId]);
+  const inspectedRun = selectedHistoryRun || runtime.result;
+  const selectedNodeRuntime = selectedRequestNode ? runtime.nodes?.[selectedRequestNode.id] : null;
+  const selectedNodeResult = selectedRequestNode
+    ? (selectedHistoryRun?.results?.[selectedRequestNode.id] || selectedNodeRuntime?.result || inspectedRun?.results?.[selectedRequestNode.id])
+    : null;
 
   return (
     <section className="flow-run-console" data-testid="flow-run-console">
       <div className="flow-run-panel flow-run-inputs">
         <div className="flow-run-heading">
           <strong>Run inputs</strong>
-          <span>{Object.keys(properties).length} fields</span>
+          <span>{activeCaseName} · {Object.keys(properties).length} fields</span>
         </div>
         <div className="flow-run-scroll">
           {Object.keys(properties).length === 0 && <div className="flow-empty-copy">No form inputs in this flow.</div>}
@@ -117,7 +140,16 @@ const RunConsole = ({
       <div className="flow-run-panel flow-run-events">
         <div className="flow-run-heading">
           <strong>Run console</strong>
-          <span className={`flow-run-status flow-run-status-${runtime.status}`}>{runtime.status}</span>
+          <div className="flow-run-history-control">
+            {runHistory.length > 0 && (
+              <select aria-label="Run history" value={selectedRunId} onChange={(event) => setSelectedRunId(event.target.value)}>
+                {runHistory.map((entry) => (
+                  <option key={entry.runId} value={entry.runId}>{entry.dataCaseName || 'Live inputs'} · {entry.status} · {entry.runId.slice(-7)}</option>
+                ))}
+              </select>
+            )}
+            <span className={`flow-run-status flow-run-status-${runtime.status}`}>{runtime.status}</span>
+          </div>
         </div>
         <div className="flow-run-scroll" data-testid="flow-run-events">
           {runtime.events.length === 0 && <div className="flow-empty-copy">Run the flow to stream node and edge events.</div>}
@@ -134,13 +166,13 @@ const RunConsole = ({
 
       <div className="flow-run-panel flow-run-preview">
         <div className="flow-run-heading">
-          <strong>Resolved request preview</strong>
+          <strong>Request, response & data</strong>
           <button type="button" onClick={onPreview} disabled={!selectedRequestNode || previewing} title="Refresh preview">
             <IconRefresh size={13} /> {previewing ? 'Resolving…' : 'Preview'}
           </button>
         </div>
         <div className="flow-run-scroll">
-          {!selectedRequestNode && <div className="flow-empty-copy">Select a request node to inspect its safe resolved projection.</div>}
+          {!selectedRequestNode && <div className="flow-empty-copy">Select a request node to inspect the canonical request and runtime variables Flow will pass to Bruno.</div>}
           {previewError && <div className="flow-run-error">{previewError}</div>}
           {displayedPreview && (
             <>
@@ -148,10 +180,20 @@ const RunConsole = ({
                 <strong>{displayedPreview.method || 'REQUEST'}</strong>
                 <span>{displayedPreview.url || selectedRequestNode?.requestRef?.itemPathname}</span>
               </div>
-              <details open><summary>Query</summary><pre>{safeStringify(displayedPreview.query)}</pre></details>
-              <details><summary>Headers</summary><pre>{safeStringify(displayedPreview.headers)}</pre></details>
-              <details><summary>Body</summary><pre>{safeStringify(displayedPreview.body)}</pre></details>
+              <details open><summary>Runtime variables</summary><pre>{safeStringify(displayedPreview.runtimeVariables || {})}</pre></details>
+              <details><summary>Query template</summary><pre>{safeStringify(displayedPreview.query)}</pre></details>
+              <details><summary>Headers template</summary><pre>{safeStringify(displayedPreview.headers)}</pre></details>
+              <details><summary>Body template</summary><pre>{safeStringify(displayedPreview.body)}</pre></details>
               <details><summary>Provenance</summary><pre>{safeStringify(displayedPreview.provenance)}</pre></details>
+            </>
+          )}
+          {selectedNodeResult && (
+            <>
+              <details open><summary>Last request</summary><pre>{safeStringify(selectedNodeResult.request || displayedPreview || {})}</pre></details>
+              <details open><summary>Response body · {selectedNodeResult.response?.status || selectedNodeResult.status || 'completed'}</summary><pre>{safeStringify(selectedNodeResult.response?.body ?? null)}</pre></details>
+              <details><summary>Response headers</summary><pre>{safeStringify(selectedNodeResult.response?.headers || {})}</pre></details>
+              <details><summary>Tests, assertions & timeline</summary><pre>{safeStringify({ tests: selectedNodeResult.tests, assertions: selectedNodeResult.assertions, timeline: selectedNodeResult.timeline, durationMs: selectedNodeResult.durationMs })}</pre></details>
+              <DataTree value={selectedNodeResult.response?.body} sourceNodeId={selectedRequestNode?.id} />
             </>
           )}
         </div>

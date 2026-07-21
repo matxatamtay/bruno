@@ -12,7 +12,7 @@ This directory is the decision record and executable proof for Phase 0 of the Br
 - [JSON Schema](./schema/flow-schema-v1.schema.json)
 - [Event contract](./event-contract.md)
 - [RequestExecutionService contract](./request-execution-service.md)
-- [MCP scope matrix](./mcp-scope-matrix.md)
+- [Current Bruno Desktop MCP](../../mcp/README.md)
 - [Spike report](./spike-report.md)
 
 ## Phase 0 gates

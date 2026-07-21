@@ -46,13 +46,23 @@ describe('FlowStore persistence gates', () => {
   it('supports CRUD without a canvas', async () => {
     const created = await store.createFlow({
       relativePath: 'checkout.flow.yml',
-      flow: createFixtureFlow()
+      flow: {
+        ...createFixtureFlow(),
+        inputSchema: { type: 'object', properties: { email: { type: 'string' } }, required: ['email'] },
+        outputSchema: { type: 'object', properties: { userId: { type: 'string' } }, required: ['userId'] }
+      }
     });
     expect(created.flow.name).toBe('Checkout flow');
 
     const catalog = await store.listFlows();
     expect(catalog).toHaveLength(1);
-    expect(catalog[0]).toMatchObject({ uid: 'flow_checkout', relativePath: 'checkout.flow.yml', status: 'valid' });
+    expect(catalog[0]).toMatchObject({
+      uid: 'flow_checkout',
+      relativePath: 'checkout.flow.yml',
+      status: 'valid',
+      inputSchema: { properties: { email: { type: 'string' } }, required: ['email'] },
+      outputSchema: { properties: { userId: { type: 'string' } }, required: ['userId'] }
+    });
 
     const updated = await store.saveFlow({
       relativePath: 'checkout.flow.yml',

@@ -12,6 +12,8 @@ jest.mock('react-hot-toast', () => ({
   error: jest.fn()
 }));
 
+jest.mock('components/Environments/EnvironmentSelector', () => () => <div data-testid="mock-environment-selector">Local</div>);
+
 jest.mock('./components/FlowCanvas', () => {
   const React = require('react');
   const {
@@ -23,33 +25,49 @@ jest.mock('./components/FlowCanvas', () => {
 
   return function MockFlowCanvas({ flow, onCommit, onSelectionChange, runtimeProjection }) {
     const authorGraph = () => {
-      const input = createInputNode(flow, 'form-input', { x: 250, y: 140 }, {
-        name: 'Customer email',
-        fieldName: 'email'
-      });
-      let next = addNode(flow, input);
-      const request = createRequestNodeFromAsset(next, {
+      let next = flow;
+      const createRequest = createRequestNodeFromAsset(next, {
         assetType: 'request',
         collectionUid: 'collection_accounts',
         collectionName: 'Accounts',
-        collectionPath: 'collections/accounts',
+        collectionPath: '.',
         itemUid: 'request_create_user',
         itemPathname: 'users/create.bru',
         name: 'Create user',
         type: 'http-request',
         method: 'POST'
-      }, { x: 520, y: 220 });
-      next = addNode(next, request);
+      }, { x: 300, y: 180 });
+      next = addNode(next, createRequest);
+      const response = createInputNode(next, 'response-extractor', { x: 500, y: 320 }, {
+        name: 'Created user id',
+        sourceNodeId: createRequest.id,
+        sourcePath: 'response.body',
+        path: 'user.id',
+        outputPath: 'value'
+      });
+      next = addNode(next, response);
+      const updateRequest = createRequestNodeFromAsset(next, {
+        assetType: 'request',
+        collectionUid: 'collection_accounts',
+        collectionName: 'Accounts',
+        collectionPath: '.',
+        itemUid: 'request_update_user',
+        itemPathname: 'users/update.bru',
+        name: 'Update user',
+        type: 'http-request',
+        method: 'PATCH'
+      }, { x: 700, y: 180 });
+      next = addNode(next, updateRequest);
       next = setNodeBinding(next, {
-        targetNodeId: request.id,
-        channel: 'body',
-        key: 'email',
-        sourceNodeId: input.id,
+        targetNodeId: updateRequest.id,
+        channel: 'runtime',
+        key: 'userId',
+        sourceNodeId: response.id,
         sourcePath: 'value'
       });
       onCommit(next, {
         topology: true,
-        nodeIds: [input.id, request.id],
+        nodeIds: [createRequest.id, response.id, updateRequest.id],
         dataEdgeIds: next.dataEdges.map((edge) => edge.id)
       });
     };
@@ -86,19 +104,30 @@ const loadedCollections = [{
   uid: 'collection_accounts',
   name: 'Accounts',
   pathname: '/workspace/collections/accounts',
+  activeEnvironmentUid: 'env_local',
+  environments: [{ uid: 'env_local', name: 'Local', variables: [] }],
+  runtimeVariables: {},
   items: [{
     uid: 'request_create_user',
     name: 'Create user',
     type: 'http-request',
     pathname: '/workspace/collections/accounts/users/create.bru',
     request: { method: 'POST', url: 'https://example.test/users' }
+  }, {
+    uid: 'request_update_user',
+    name: 'Update user',
+    type: 'http-request',
+    pathname: '/workspace/collections/accounts/users/update.bru',
+    request: { method: 'PATCH', url: 'https://example.test/users/{{userId}}' }
   }]
 }];
 
 const createStore = () => configureStore({
   reducer: {
     flowCatalog: flowCatalogReducer,
-    collections: (state = { collections: loadedCollections }) => state
+    collections: (state = { collections: loadedCollections }) => state,
+    globalEnvironments: (state = { globalEnvironments: [], activeGlobalEnvironmentUid: null }) => state,
+    tabs: (state = { tabs: [], activeTabUid: null }) => state
   }
 });
 
@@ -106,7 +135,7 @@ const toRecord = (relativePath, input) => {
   const serialized = serializeFlowDocument(input);
   return {
     relativePath,
-    pathname: `/workspace/flows/${relativePath}`,
+    pathname: `/workspace/collections/accounts/flows/${relativePath}`,
     content: serialized.content,
     flow: serialized.flow,
     storedRevision: serialized.flow.revision,
@@ -127,7 +156,7 @@ const toCatalogEntry = (record) => ({
 
 const renderWorkspace = (store) => render(
   <Provider store={store}>
-    <FlowStudioWorkspace workspace={workspace} />
+    <FlowStudioWorkspace workspace={workspace} collection={loadedCollections[0]} />
   </Provider>
 );
 
@@ -202,8 +231,9 @@ describe('Flow Studio workspace UI', () => {
                 url: 'https://example.test/users',
                 query: { trace: '42' },
                 headers: { Authorization: '[REDACTED]' },
-                body: { email: 'customer@example.test' },
-                provenance: { 'request.header.Authorization': [{ kind: 'environment', nodeId: 'env_auth' }] }
+                body: { email: '{{email}}' },
+                runtimeVariables: { userId: 'user-7' },
+                provenance: { 'runtime.userId': [{ kind: 'response', nodeId: 'request_create_user' }] }
               },
               bindings: []
             }
@@ -295,7 +325,7 @@ describe('Flow Studio workspace UI', () => {
 
     await waitFor(() => expect(window.ipcRenderer.invoke).toHaveBeenCalledWith(
       'renderer:flow-catalog-open',
-      { workspaceUid: workspace.uid, workspacePath: workspace.pathname }
+      { workspaceUid: loadedCollections[0].uid, workspacePath: loadedCollections[0].pathname }
     ));
 
     fireEvent.click(screen.getByTitle('Create flow'));
@@ -306,16 +336,16 @@ describe('Flow Studio workspace UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Author graph' }));
 
     await waitFor(() => {
-      expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4');
+      expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5');
       expect(screen.getByTestId('mock-flow-data-edge-count')).toHaveTextContent('1');
     });
 
     fireEvent.click(screen.getByTestId('flow-save-button'));
 
     await waitFor(() => {
-      expect(storedRecord.flow.nodes).toHaveLength(4);
+      expect(storedRecord.flow.nodes).toHaveLength(5);
       expect(storedRecord.flow.dataEdges).toHaveLength(1);
-      expect(storedRecord.flow.nodes.find((node) => node.kind === 'http').config.bindings.body.email).toBeDefined();
+      expect(storedRecord.flow.nodes.find((node) => node.requestRef?.expectedItemUid === 'request_update_user').config.bindings.runtime.userId).toBeDefined();
     });
 
     firstMount.unmount();
@@ -324,11 +354,11 @@ describe('Flow Studio workspace UI', () => {
     renderWorkspace(secondStore);
 
     await waitFor(() => {
-      expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4');
+      expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5');
       expect(screen.getByTestId('mock-flow-data-edge-count')).toHaveTextContent('1');
     });
     expect(window.ipcRenderer.invoke).toHaveBeenCalledWith('renderer:flow-read', {
-      workspacePath: workspace.pathname,
+      workspacePath: loadedCollections[0].pathname,
       relativePath: storedRecord.relativePath
     });
   });
@@ -341,13 +371,13 @@ describe('Flow Studio workspace UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
     await screen.findByTestId('mock-flow-node-count');
     fireEvent.click(screen.getByRole('button', { name: 'Author graph' }));
-    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4'));
+    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5'));
 
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
     await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('2'));
 
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true, shiftKey: true });
-    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4'));
+    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5'));
 
     fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
     expect(screen.getByPlaceholderText('Find node')).toHaveFocus();
@@ -356,7 +386,7 @@ describe('Flow Studio workspace UI', () => {
     await waitFor(() => expect(window.ipcRenderer.invoke).toHaveBeenCalledWith(
       'renderer:flow-save',
       expect.objectContaining({
-        workspacePath: workspace.pathname,
+        workspacePath: loadedCollections[0].pathname,
         relativePath: storedRecord.relativePath
       })
     ));
@@ -396,7 +426,7 @@ describe('Flow Studio workspace UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
     await screen.findByTestId('mock-flow-node-count');
     fireEvent.click(screen.getByRole('button', { name: 'Author graph' }));
-    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4'));
+    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5'));
 
     runtimeMode = 'failed';
     fireEvent.click(screen.getByTestId('flow-run-button'));
@@ -404,7 +434,7 @@ describe('Flow Studio workspace UI', () => {
     await waitFor(() => expect(screen.getByTestId('mock-flow-runtime-status')).toHaveTextContent('failed'));
     expect(screen.getByText('getaddrinfo ENOTFOUND api.invalid.test')).toBeInTheDocument();
     expect(screen.getByTestId('flow-run-console')).toBeInTheDocument();
-    expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4');
+    expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5');
   });
 
   it('pauses at a checkpoint and resumes through the main-process journal', async () => {
@@ -415,7 +445,7 @@ describe('Flow Studio workspace UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
     await screen.findByTestId('mock-flow-node-count');
     fireEvent.click(screen.getByRole('button', { name: 'Author graph' }));
-    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('4'));
+    await waitFor(() => expect(screen.getByTestId('mock-flow-node-count')).toHaveTextContent('5'));
 
     runtimeMode = 'paused';
     fireEvent.click(screen.getByTestId('flow-run-button'));

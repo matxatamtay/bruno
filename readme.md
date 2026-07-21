@@ -57,6 +57,7 @@ You can explore our [paid versions](https://www.usebruno.com/pricing) to see if 
 
 - [Installation](#installation)
 - [Bruno CLI](#bruno-cli)
+- [MCP for Codex and Claude](#mcp-for-codex-and-claude)
 - [Run with Docker](#run-with-docker)
 - [Features](#features)
   - [Run across multiple platforms 🖥️](#run-across-multiple-platforms-%EF%B8%8F)
@@ -134,6 +135,12 @@ bru run folder --env Local
 ```
 
 For the full command reference, see the [Bruno CLI documentation](https://docs.usebruno.com/bru-cli/overview).
+
+## MCP for Codex and Claude
+
+Bruno Desktop includes a local collection-native MCP server for searching, reading, creating, editing, moving, deleting, resolving, and running Bruno requests. Codex, Claude Desktop, and Claude Code can launch Bruno's packaged stdio bridge with `--mcp-stdio`; the bridge keeps the bearer token in Bruno's protected local store instead of placing it in client configuration.
+
+Enable it under **Preferences > MCP**, then copy the generated client configuration. See the [Bruno Desktop MCP guide](docs/mcp/README.md) for Codex, Claude Desktop, Claude Code, Streamable HTTP, tool coverage, and troubleshooting.
 
 ## Run with Docker
 

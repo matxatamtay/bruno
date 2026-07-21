@@ -646,7 +646,6 @@ export const switchWorkspace = (workspaceUid) => {
       if (scratchCollection?.uid) {
         dispatch(addTab({ uid: `${scratchCollection.uid}-overview`, collectionUid: scratchCollection.uid, type: 'workspaceOverview' }));
         dispatch(addTab({ uid: `${scratchCollection.uid}-environments`, collectionUid: scratchCollection.uid, type: 'workspaceEnvironments' }));
-        dispatch(addTab({ uid: `${scratchCollection.uid}-flows`, collectionUid: scratchCollection.uid, type: 'workspaceFlowStudio' }));
 
         requestedWorkspaceTabType = workspaceSnapshot?.activeWorkspaceTabType;
         const requestedWorkspaceTabSuffix = WORKSPACE_TAB_UID_SUFFIX_BY_TYPE[requestedWorkspaceTabType];

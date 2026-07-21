@@ -98,18 +98,10 @@ const defaultPreferences = {
   },
   mcp: {
     enabled: false,
-    host: '127.0.0.1',
     port: 3847,
-    allowRemote: false,
-    permissionProfile: 'read-only',
-    allowedWorkspaces: [],
-    allowedHosts: [],
-    allowPrivateHosts: false,
-    allowDynamicHosts: false,
-    auditEnabled: true,
-    rateLimitPerMinute: 120,
+    workspaces: [],
     requestTimeoutMs: 120000,
-    maxRequestFiles: 10000
+    maxRequestFiles: 20000
   }
 };
 
@@ -217,22 +209,14 @@ const preferencesSchema = Yup.object().shape({
   }).optional(),
   mcp: Yup.object({
     enabled: Yup.boolean(),
-    host: Yup.string().max(255).required(),
     port: Yup.number().integer().min(1).max(65535).required(),
-    allowRemote: Yup.boolean(),
-    permissionProfile: Yup.string().oneOf(['read-only', 'runner', 'editor', 'full-control']).required(),
-    allowedWorkspaces: Yup.array().of(Yup.object({
+    workspaces: Yup.array().of(Yup.object({
       uid: Yup.string().max(255).optional(),
       name: Yup.string().max(255).optional(),
       path: Yup.string().max(2048).required()
     })).max(100),
-    allowedHosts: Yup.array().of(Yup.string().max(255)).max(500),
-    allowPrivateHosts: Yup.boolean(),
-    allowDynamicHosts: Yup.boolean(),
-    auditEnabled: Yup.boolean(),
-    rateLimitPerMinute: Yup.number().integer().min(10).max(10000),
-    requestTimeoutMs: Yup.number().integer().min(1000).max(300000),
-    maxRequestFiles: Yup.number().integer().min(100).max(20000)
+    requestTimeoutMs: Yup.number().integer().min(1000).max(600000),
+    maxRequestFiles: Yup.number().integer().min(100).max(100000)
   }).optional()
 });
 

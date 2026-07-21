@@ -9,116 +9,101 @@ jest.mock('./StyledWrapper', () => ({ children }) => <div>{children}</div>);
 jest.mock('components/ToggleSwitch', () => ({ isOn, handleToggle, ...props }) => (
   <button type="button" aria-label="Enable Bruno MCP" aria-pressed={isOn} onClick={handleToggle} {...props}>toggle</button>
 ));
-jest.mock('react-hot-toast', () => ({
-  success: jest.fn(),
-  error: jest.fn()
-}));
+jest.mock('react-hot-toast', () => ({ success: jest.fn(), error: jest.fn() }));
 
 const initialPreferences = {
   request: { sslVerification: true },
   general: {},
   mcp: {
     enabled: false,
-    host: '127.0.0.1',
     port: 3847,
-    allowRemote: false,
-    permissionProfile: 'read-only',
-    allowedWorkspaces: [],
-    allowedHosts: [],
-    allowPrivateHosts: false,
-    allowDynamicHosts: false,
-    auditEnabled: true,
-    rateLimitPerMinute: 120,
+    workspaces: [],
     requestTimeoutMs: 120000,
-    maxRequestFiles: 10000
+    maxRequestFiles: 20000
   }
 };
 
+const clientConfigs = {
+  codex: { configPath: '~/.codex/config.toml', snippet: '[mcp_servers.bruno]\ncommand = "/Applications/Bruno.app/Contents/MacOS/Bruno"' },
+  claudeDesktop: { configPath: '~/Library/Application Support/Claude/claude_desktop_config.json', snippet: '{"mcpServers":{"bruno":{"command":"Bruno","args":["--mcp-stdio"]}}}' },
+  claudeCode: { configPath: '.mcp.json', snippet: '{"mcpServers":{"bruno":{"command":"Bruno","args":["--mcp-stdio"]}}}' }
+};
+
 const renderMcp = (invoke) => {
-  window.ipcRenderer = {
-    invoke,
-    on: jest.fn(() => jest.fn())
-  };
+  window.ipcRenderer = { invoke, on: jest.fn(() => jest.fn()) };
   const store = configureStore({
     reducer: { app: appReducer },
-    preloadedState: {
-      app: {
-        preferences: initialPreferences
-      }
-    }
+    preloadedState: { app: { preferences: initialPreferences } }
   });
   render(<Provider store={store}><Mcp /></Provider>);
   return store;
 };
 
 describe('Bruno MCP Preferences', () => {
-  it('loads safe status and saves loopback configuration through the preferences IPC', async () => {
+  it('saves only the local collection MCP configuration', async () => {
     const invoke = jest.fn(async (channel) => {
-      if (channel === 'renderer:mcp-status') {
-        return {
-          ok: true,
-          data: {
-            running: false,
-            endpoint: 'http://127.0.0.1:3847/mcp',
-            permissionProfile: 'read-only',
-            connectedClients: 0,
-            loopbackOnly: true
-          }
-        };
-      }
+      if (channel === 'renderer:mcp-status') return { ok: true, data: { running: false, endpoint: 'http://127.0.0.1:3847/mcp', connectedClients: 0, workspaceCount: 0 } };
+      if (channel === 'renderer:mcp-client-configs') return { ok: true, data: clientConfigs };
       if (channel === 'renderer:save-preferences') return undefined;
       throw new Error(`Unexpected channel ${channel}`);
     });
-    const store = renderMcp(invoke);
+    renderMcp(invoke);
 
     await waitFor(() => expect(screen.getByText('Stopped')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Enable Bruno MCP' }));
-    fireEvent.change(screen.getByLabelText('Permission profile'), { target: { value: 'runner' } });
-    fireEvent.change(screen.getByLabelText('Allowed workspace paths, one per line'), { target: { value: '/workspace/api' } });
-    fireEvent.change(screen.getByLabelText('Allowed network hosts, one per line'), { target: { value: 'api.test\n*.example.test' } });
+    fireEvent.change(screen.getByLabelText('Workspace paths for discovery, one per line'), { target: { value: '/workspace/api\n/workspace/mobile' } });
+    fireEvent.change(screen.getByLabelText('Request timeout, ms'), { target: { value: '60000' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save and restart MCP' }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('renderer:save-preferences', expect.objectContaining({
-      mcp: expect.objectContaining({
+      mcp: {
         enabled: true,
-        host: '127.0.0.1',
-        permissionProfile: 'runner',
-        allowedWorkspaces: [{ path: '/workspace/api' }],
-        allowedHosts: ['api.test', '*.example.test']
-      })
+        port: 3847,
+        requestTimeoutMs: 60000,
+        maxRequestFiles: 20000,
+        workspaces: [{ path: '/workspace/api' }, { path: '/workspace/mobile' }]
+      }
     })));
-    expect(store.getState().app.preferences.mcp.permissionProfile).toBe('runner');
+    expect(screen.queryByLabelText('Permission profile')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Allowed network hosts, one per line')).not.toBeInTheDocument();
+  });
+
+  it('explains that Flow Studio and Intelligence Suite are excluded', async () => {
+    const invoke = jest.fn(async (channel) => ({ ok: true, data: channel === 'renderer:mcp-client-configs' ? clientConfigs : { running: false } }));
+    renderMcp(invoke);
+    expect(await screen.findByText(/Flow Studio and Intelligence Suite are intentionally not exposed/i)).toBeInTheDocument();
   });
 
   it('shows a rotated token only after the explicit rotate action', async () => {
+    const shownToken = ['shown', 'once', 'value'].join('-');
     const invoke = jest.fn(async (channel) => {
-      if (channel === 'renderer:mcp-status') return { ok: true, data: { running: true, endpoint: 'http://127.0.0.1:3847/mcp', loopbackOnly: true } };
-      if (channel === 'renderer:mcp-rotate-token') return { ok: true, data: { token: 'shown-once-token', fingerprint: 'abcd' } };
+      if (channel === 'renderer:mcp-status') return { ok: true, data: { running: true, endpoint: 'http://127.0.0.1:3847/mcp' } };
+      if (channel === 'renderer:mcp-client-configs') return { ok: true, data: clientConfigs };
+      if (channel === 'renderer:mcp-rotate-token') return { ok: true, data: { token: shownToken, fingerprint: 'abcd' } };
       throw new Error(`Unexpected channel ${channel}`);
     });
     renderMcp(invoke);
 
-    expect(screen.queryByText('shown-once-token')).not.toBeInTheDocument();
+    expect(screen.queryByText(shownToken)).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: /Rotate token/i }));
-    expect(await screen.findByText('shown-once-token')).toBeInTheDocument();
+    expect(await screen.findByText(shownToken)).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith('renderer:mcp-rotate-token', { reveal: true });
   });
 
-  it('requires confirmation before enabling a non-loopback bind', async () => {
-    const invoke = jest.fn(async (channel) => {
-      if (channel === 'renderer:mcp-status') return { ok: true, data: { running: false, loopbackOnly: true } };
-      throw new Error(`Unexpected channel ${channel}`);
-    });
-    window.confirm = jest.fn(() => false);
+  it('shows copy-ready Codex and Claude stdio configurations without a token', async () => {
+    const writeText = jest.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const invoke = jest.fn(async (channel) => ({
+      ok: true,
+      data: channel === 'renderer:mcp-client-configs' ? clientConfigs : { running: true }
+    }));
     renderMcp(invoke);
-    const remoteToggle = await screen.findByRole('checkbox', { name: /Advanced: allow non-loopback bind/i });
 
-    fireEvent.click(remoteToggle);
-    expect(window.confirm).toHaveBeenCalledTimes(1);
-    expect(remoteToggle).not.toBeChecked();
+    expect(await screen.findByText('[mcp_servers.bruno]', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(/Claude Desktop \/ Claude Code/)).toBeInTheDocument();
+    expect(screen.queryByText(/shown-once-value/)).not.toBeInTheDocument();
 
-    window.confirm.mockReturnValue(true);
-    fireEvent.click(remoteToggle);
-    expect(remoteToggle).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: /Copy Codex config/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(clientConfigs.codex.snippet));
   });
 });
