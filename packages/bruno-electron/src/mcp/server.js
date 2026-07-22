@@ -5,7 +5,7 @@ const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/ser
 const { z } = require('zod');
 const { normalizeMcpConfig } = require('./config');
 const { McpTokenStore } = require('./token-store');
-const { safeMcpError } = require('./redaction');
+const { redactMcpValue, safeMcpError } = require('./redaction');
 const { BrunoMcpAutomationFacade } = require('./automation-facade');
 const { createMcpClientConfigurations } = require('./client-config');
 
@@ -70,7 +70,7 @@ const executionSchema = {
   prompt_variables: z.record(z.string(), z.unknown()).optional()
 };
 
-const registerBrunoMcpTools = (mcp, { facade }) => {
+const registerBrunoMcpTools = (mcp, { facade, onCall }) => {
   const register = (name, description, inputSchema, handler, annotations = {}) => {
     mcp.registerTool(name, {
       description,
@@ -82,9 +82,13 @@ const registerBrunoMcpTools = (mcp, { facade }) => {
         ...annotations
       }
     }, async (args = {}) => {
+      const startedAt = Date.now();
       try {
-        return jsonText(await handler(args));
+        const result = await handler(args);
+        onCall?.({ tool: name, args, result, error: null, durationMs: Date.now() - startedAt });
+        return jsonText(result);
       } catch (error) {
+        onCall?.({ tool: name, args, result: null, error, durationMs: Date.now() - startedAt });
         return { isError: true, ...jsonText({ error: safeMcpError(error) }) };
       }
     });
@@ -243,6 +247,74 @@ class BrunoMcpServerManager {
     this.facade = new BrunoMcpAutomationFacade({ requestExecutionService, configProvider: () => this.config, now });
     this.clients = new Map();
     this.activeToken = null;
+    this.lastError = null;
+    this.operationQueue = Promise.resolve();
+    this.restarting = false;
+    this.connectionEvents = [];
+    this.maxConnectionEvents = 200;
+    this.eventSeq = 0;
+  }
+
+  // Records one MCP tool call for the "Connections" viewer: which tool, from where, how long
+  // it took, and its (redacted) request/response. Kept as a bounded in-memory ring buffer and
+  // pushed to the renderer in real time.
+  _recordCall({ tool, args, result, error, durationMs, remoteAddress, remotePort }) {
+    const entry = {
+      id: `mcpcall_${++this.eventSeq}`,
+      timestamp: this.now().toISOString(),
+      tool,
+      source: `${remoteAddress || 'unknown'}:${remotePort ?? '?'}`,
+      durationMs,
+      status: error ? 'error' : 'success',
+      request: redactMcpValue(args ?? {}, {}),
+      response: error ? null : redactMcpValue(result ?? null, {}),
+      error: error ? safeMcpError(error) : null
+    };
+    this.connectionEvents.push(entry);
+    if (this.connectionEvents.length > this.maxConnectionEvents) this.connectionEvents.shift();
+    if (this.mainWindow && !this.mainWindow.isDestroyed?.()) {
+      this.mainWindow.webContents.send('main:mcp-connection-event', entry);
+    }
+    return entry;
+  }
+
+  getConnectionEvents() {
+    return this.connectionEvents;
+  }
+
+  // Serializes start/stop/restart so overlapping preference saves (or a restart racing the
+  // initial launch) can't leave two listeners fighting for the same port or double-close a server.
+  _enqueue(operation) {
+    const run = this.operationQueue.then(operation, operation);
+    this.operationQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  // Node's server.listen() callback only fires on success; without an explicit timeout a bind
+  // that neither succeeds nor errors (observed on macOS when the OS silently withholds the
+  // local-network permission a signed app needs) leaves start() hanging forever.
+  _listen(server) {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        server.off('error', onError);
+        server.off('listening', onListening);
+      };
+      const onError = (error) => {
+        cleanup(); reject(error);
+      };
+      const onListening = () => {
+        cleanup(); resolve();
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        server.close();
+        reject(new Error(`Bruno MCP timed out binding to ${this.config.host}:${this.config.port}. Another process may be using this port, or macOS may be withholding local network permission for Bruno.`));
+      }, 5000);
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(this.config.port, this.config.host);
+    });
   }
 
   setMainWindow(mainWindow) { this.mainWindow = mainWindow; }
@@ -251,11 +323,31 @@ class BrunoMcpServerManager {
     this.mainWindow.webContents.send('main:mcp-status', this.getStatus());
   }
 
-  async start() {
+  start() { return this._enqueue(() => this._doStart()); }
+  stop() { return this._enqueue(() => this._doStop()); }
+  restart() { return this._enqueue(() => this._doRestart()); }
+
+  async _doStart() {
     if (this.server) return this.getStatus();
     this.config = normalizeMcpConfig(this.getPreferences());
     if (!this.config.enabled) return this.getStatus();
-    this.activeToken = (await this.tokenStore.ensure()).token;
+    try {
+      this.activeToken = (await this.tokenStore.ensure()).token;
+      const server = await this._createAndBindServer();
+      this.server = server;
+      this.startedAt = this.now().toISOString();
+      this.lastError = null;
+    } catch (error) {
+      this.lastError = error;
+      console.error('Bruno MCP failed to start:', error?.message || error);
+      this.emitStatus();
+      throw error;
+    }
+    this.emitStatus();
+    return this.getStatus();
+  }
+
+  async _createAndBindServer() {
     const server = http.createServer(async (request, response) => {
       try {
         const requestUrl = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
@@ -285,7 +377,14 @@ class BrunoMcpServerManager {
         this.clients.set(clientKey, { remoteAddress: request.socket.remoteAddress, lastSeenAt: this.now().toISOString() });
         const body = await parseJsonBody(request);
         const mcp = new McpServer({ name: 'Bruno Desktop', version: '2.0.0' });
-        registerBrunoMcpTools(mcp, { facade: this.facade });
+        registerBrunoMcpTools(mcp, {
+          facade: this.facade,
+          onCall: (call) => this._recordCall({
+            ...call,
+            remoteAddress: request.socket.remoteAddress,
+            remotePort: request.socket.remotePort
+          })
+        });
         registerBrunoMcpResources(mcp, this.facade);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         response.on('close', () => {
@@ -302,21 +401,28 @@ class BrunoMcpServerManager {
         response.end(JSON.stringify({ error: safeMcpError(error) }));
       }
     });
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(this.config.port, this.config.host, resolve);
-    });
-    this.server = server;
-    this.startedAt = this.now().toISOString();
-    this.emitStatus();
-    return this.getStatus();
+    await this._listen(server);
+    return server;
   }
 
-  async stop() {
+  async _doStop() {
     if (!this.server) return this.getStatus();
     const server = this.server;
     this.server = null;
-    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(forceCloseTimer);
+        resolve();
+      };
+      server.close(finish);
+      // A client (e.g. a stdio bridge left connected to an AI agent) can hold an idle
+      // keep-alive socket open indefinitely; server.close() waits for it by design. Force
+      // remaining sockets shut after a grace period so stop()/restart() always completes.
+      const forceCloseTimer = setTimeout(() => server.closeAllConnections?.(), 2000);
+    });
     this.startedAt = null;
     this.clients.clear();
     this.activeToken = null;
@@ -324,28 +430,42 @@ class BrunoMcpServerManager {
     return this.getStatus();
   }
 
-  async restart() {
-    await this.stop();
-    this.config = normalizeMcpConfig(this.getPreferences());
-    return this.config.enabled ? this.start() : this.getStatus();
+  async _doRestart() {
+    this.restarting = true;
+    this.emitStatus();
+    try {
+      await this._doStop();
+      this.config = normalizeMcpConfig(this.getPreferences());
+      if (this.config.enabled) await this._doStart();
+    } finally {
+      // Reset and re-emit together, after start/stop settle either way, so a failed restart
+      // still leaves listeners with a final running/stopped status instead of a stale
+      // "restarting" snapshot.
+      this.restarting = false;
+      this.emitStatus();
+    }
+    return this.getStatus();
   }
 
   get endpoint() { return `http://${this.config.host}:${this.config.port}/mcp`; }
   getStatus() {
+    const running = Boolean(this.server);
     return {
       enabled: this.config.enabled,
-      running: Boolean(this.server),
+      running,
+      state: this.restarting ? 'restarting' : (running ? 'running' : 'stopped'),
       endpoint: this.endpoint,
       host: this.config.host,
       port: this.config.port,
       workspaceCount: this.config.workspaces.length,
       connectedClients: this.clients.size,
-      startedAt: this.startedAt
+      startedAt: this.startedAt,
+      error: this.lastError?.message || null
     };
   }
 
   getClientConfigurations() {
-    return createMcpClientConfigurations(this.stdioLaunch);
+    return createMcpClientConfigurations({ endpoint: this.endpoint });
   }
 
   async applyPreferences(preferences) {

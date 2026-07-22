@@ -1,14 +1,4 @@
-const normalizeLaunch = ({ command, args = [] } = {}) => {
-  const normalizedCommand = String(command || '').trim();
-  if (!normalizedCommand) throw new TypeError('Bruno MCP stdio command is required');
-  return {
-    command: normalizedCommand,
-    args: Array.isArray(args) ? args.map((value) => String(value)) : []
-  };
-};
-
 const tomlString = (value) => JSON.stringify(String(value));
-const tomlArray = (values) => `[${values.map(tomlString).join(', ')}]`;
 
 const claudeDesktopConfigPath = (platform = process.platform) => {
   if (platform === 'darwin') return '~/Library/Application Support/Claude/claude_desktop_config.json';
@@ -16,48 +6,64 @@ const claudeDesktopConfigPath = (platform = process.platform) => {
   return '~/.config/Claude/claude_desktop_config.json';
 };
 
-const buildCodexConfig = (launch) => [
+const buildCodexConfig = (endpoint, tokenEnvVar) => [
   '[mcp_servers.bruno]',
-  `command = ${tomlString(launch.command)}`,
-  `args = ${tomlArray(launch.args)}`,
+  `url = ${tomlString(endpoint)}`,
+  `bearer_token_env_var = ${tomlString(tokenEnvVar)}`,
   'startup_timeout_sec = 20',
   'tool_timeout_sec = 120'
 ].join('\n');
 
-const buildClaudeConfig = (launch) => JSON.stringify({
+const buildClaudeCodeConfig = (endpoint, tokenEnvVar) => JSON.stringify({
   mcpServers: {
     bruno: {
-      command: launch.command,
-      args: launch.args
+      type: 'http',
+      url: endpoint,
+      headers: { Authorization: `Bearer \${${tokenEnvVar}}` }
     }
   }
 }, null, 2);
 
-const createMcpClientConfigurations = ({ command, args, platform = process.platform } = {}) => {
-  const launch = normalizeLaunch({ command, args });
-  const claudeSnippet = buildClaudeConfig(launch);
+// Claude Desktop only speaks stdio to MCP servers, so it reaches Bruno's Streamable HTTP
+// endpoint through the `mcp-remote` bridge (https://github.com/geelen/mcp-remote). The token
+// is embedded in this snippet's own `env` block rather than the user's shell, since GUI apps
+// launched outside a terminal don't inherit shell environment variables.
+const buildClaudeDesktopConfig = (endpoint, tokenEnvVar) => JSON.stringify({
+  mcpServers: {
+    bruno: {
+      command: 'npx',
+      args: ['-y', 'mcp-remote', endpoint, '--allow-http', '--header', `Authorization:\${${tokenEnvVar}}`],
+      env: { [tokenEnvVar]: 'Bearer <paste-your-bruno-mcp-token-here>' }
+    }
+  }
+}, null, 2);
+
+const createMcpClientConfigurations = ({ endpoint, tokenEnvVar = 'BRUNO_MCP_TOKEN', platform = process.platform } = {}) => {
+  const normalizedEndpoint = String(endpoint || '').trim();
+  if (!normalizedEndpoint) throw new TypeError('Bruno MCP endpoint is required');
   return {
-    transport: 'stdio',
-    launch,
+    transport: 'http',
+    endpoint: normalizedEndpoint,
+    tokenEnvVar,
     codex: {
       configPath: '~/.codex/config.toml',
-      snippet: buildCodexConfig(launch)
-    },
-    claudeDesktop: {
-      configPath: claudeDesktopConfigPath(platform),
-      snippet: claudeSnippet
+      snippet: buildCodexConfig(normalizedEndpoint, tokenEnvVar)
     },
     claudeCode: {
       configPath: '.mcp.json',
-      snippet: claudeSnippet
+      snippet: buildClaudeCodeConfig(normalizedEndpoint, tokenEnvVar)
+    },
+    claudeDesktop: {
+      configPath: claudeDesktopConfigPath(platform),
+      snippet: buildClaudeDesktopConfig(normalizedEndpoint, tokenEnvVar)
     }
   };
 };
 
 module.exports = {
-  buildClaudeConfig,
+  buildClaudeCodeConfig,
+  buildClaudeDesktopConfig,
   buildCodexConfig,
   claudeDesktopConfigPath,
-  createMcpClientConfigurations,
-  normalizeLaunch
+  createMcpClientConfigurations
 };

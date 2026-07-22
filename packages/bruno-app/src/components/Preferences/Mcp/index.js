@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { IconCopy, IconRefresh, IconRotate, IconUnlink } from '@tabler/icons';
 import ToggleSwitch from 'components/ToggleSwitch';
 import { savePreferences } from 'providers/ReduxStore/slices/app';
+import useMcpStatus, { invokeMcp } from 'hooks/useMcpStatus';
 import StyledWrapper from './StyledWrapper';
 
 const splitLines = (value) => String(value || '').split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
@@ -13,33 +14,16 @@ const Mcp = () => {
   const preferences = useSelector((state) => state.app.preferences);
   const source = preferences.mcp || {};
   const [draft, setDraft] = useState(source);
-  const [status, setStatus] = useState(null);
+  const { status, refreshStatus } = useMcpStatus();
   const [saving, setSaving] = useState(false);
   const [revealedToken, setRevealedToken] = useState('');
   const [clientConfigs, setClientConfigs] = useState(null);
 
   useEffect(() => setDraft(source), [source]);
 
-  const invoke = useCallback(async (channel, payload) => {
-    const response = await window.ipcRenderer.invoke(channel, payload);
-    if (!response?.ok) throw new Error(response?.error?.message || 'Bruno MCP operation failed');
-    return response.data;
-  }, []);
-
-  const refreshStatus = useCallback(async () => {
-    try {
-      setStatus(await invoke('renderer:mcp-status'));
-    } catch (error) {
-      setStatus({ running: false, error: error.message });
-    }
-  }, [invoke]);
-
   useEffect(() => {
-    refreshStatus();
-    invoke('renderer:mcp-client-configs').then(setClientConfigs).catch(() => setClientConfigs(null));
-    const removeListener = window.ipcRenderer.on('main:mcp-status', (nextStatus) => setStatus(nextStatus));
-    return () => removeListener?.();
-  }, [invoke, refreshStatus]);
+    invokeMcp('renderer:mcp-client-configs').then(setClientConfigs).catch(() => setClientConfigs(null));
+  }, []);
 
   const configuredWorkspaces = draft.workspaces || draft.allowedWorkspaces || [];
   const workspaceText = useMemo(() => configuredWorkspaces.map((workspace) => workspace.path || workspace).join('\n'), [configuredWorkspaces]);
@@ -68,7 +52,7 @@ const Mcp = () => {
 
   const rotateToken = async () => {
     try {
-      const result = await invoke('renderer:mcp-rotate-token', { reveal: true });
+      const result = await invokeMcp('renderer:mcp-rotate-token', { reveal: true });
       setRevealedToken(result.token || '');
       toast.success('MCP token rotated. Existing clients were disconnected.');
       await refreshStatus();
@@ -79,7 +63,7 @@ const Mcp = () => {
 
   const disconnectClients = async () => {
     try {
-      const result = await invoke('renderer:mcp-disconnect-clients');
+      const result = await invokeMcp('renderer:mcp-disconnect-clients');
       setRevealedToken(result.token || '');
       toast.success('Clients disconnected and token revoked');
       await refreshStatus();
@@ -138,7 +122,9 @@ const Mcp = () => {
         <div className="mcp-status-heading">
           <div>
             <strong>Server status</strong>
-            <small className={status?.running ? 'online' : 'offline'}>{status?.running ? 'Running' : 'Stopped'}</small>
+            <small className={status?.state === 'restarting' ? 'restarting' : (status?.running ? 'online' : 'offline')}>
+              {status?.state === 'restarting' ? 'Restarting…' : (status?.running ? 'Running' : 'Stopped')}
+            </small>
           </div>
           <button type="button" className="mcp-icon-button" onClick={refreshStatus} title="Refresh MCP status"><IconRefresh size={15} /></button>
         </div>
@@ -166,7 +152,9 @@ const Mcp = () => {
         <div className="mcp-client-heading">
           <div>
             <strong>Connect Codex and Claude</strong>
-            <small>These clients launch Bruno in stdio bridge mode. Keep the Bruno desktop app open with MCP enabled. The local token stays in Bruno's protected store and is not written into either client config.</small>
+            <small>
+              Bruno MCP serves Streamable HTTP directly, so Codex and Claude Code connect straight to the endpoint above. Claude Desktop only speaks stdio to MCP servers, so it connects through the <code>mcp-remote</code> bridge instead. Keep Bruno open with MCP enabled, then use "Rotate token" to reveal a token and set it as <code>{clientConfigs?.tokenEnvVar || 'BRUNO_MCP_TOKEN'}</code> — Codex and Claude Code read it from that environment variable; the Claude Desktop snippet already has a spot to paste it directly.
+            </small>
           </div>
         </div>
         <div className="mcp-client-configs">
@@ -175,14 +163,21 @@ const Mcp = () => {
               <div><strong>Codex</strong><small>{clientConfigs?.codex?.configPath || '~/.codex/config.toml'}</small></div>
               <button type="button" aria-label="Copy Codex config" disabled={!clientConfigs?.codex?.snippet} onClick={() => copyText(clientConfigs?.codex?.snippet || '', 'Codex config')}><IconCopy size={13} /> Copy</button>
             </div>
-            <pre>{clientConfigs?.codex?.snippet || 'Save MCP preferences to generate the installed Bruno command.'}</pre>
+            <pre>{clientConfigs?.codex?.snippet || 'Save MCP preferences to generate the Bruno MCP endpoint.'}</pre>
           </section>
           <section>
             <div className="mcp-config-heading">
-              <div><strong>Claude Desktop / Claude Code</strong><small>{clientConfigs?.claudeDesktop?.configPath || 'claude_desktop_config.json'} or {clientConfigs?.claudeCode?.configPath || '.mcp.json'}</small></div>
-              <button type="button" aria-label="Copy Claude config" disabled={!clientConfigs?.claudeDesktop?.snippet} onClick={() => copyText(clientConfigs?.claudeDesktop?.snippet || '', 'Claude config')}><IconCopy size={13} /> Copy</button>
+              <div><strong>Claude Code</strong><small>{clientConfigs?.claudeCode?.configPath || '.mcp.json'}</small></div>
+              <button type="button" aria-label="Copy Claude Code config" disabled={!clientConfigs?.claudeCode?.snippet} onClick={() => copyText(clientConfigs?.claudeCode?.snippet || '', 'Claude Code config')}><IconCopy size={13} /> Copy</button>
             </div>
-            <pre>{clientConfigs?.claudeDesktop?.snippet || 'Save MCP preferences to generate the installed Bruno command.'}</pre>
+            <pre>{clientConfigs?.claudeCode?.snippet || 'Save MCP preferences to generate the Bruno MCP endpoint.'}</pre>
+          </section>
+          <section>
+            <div className="mcp-config-heading">
+              <div><strong>Claude Desktop</strong><small>{clientConfigs?.claudeDesktop?.configPath || 'claude_desktop_config.json'} (via mcp-remote)</small></div>
+              <button type="button" aria-label="Copy Claude Desktop config" disabled={!clientConfigs?.claudeDesktop?.snippet} onClick={() => copyText(clientConfigs?.claudeDesktop?.snippet || '', 'Claude Desktop config')}><IconCopy size={13} /> Copy</button>
+            </div>
+            <pre>{clientConfigs?.claudeDesktop?.snippet || 'Save MCP preferences to generate the Bruno MCP endpoint.'}</pre>
           </section>
         </div>
       </div>

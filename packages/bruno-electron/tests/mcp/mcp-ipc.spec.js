@@ -14,11 +14,12 @@ describe('Bruno MCP preferences IPC', () => {
     require('electron').ipcMain.handle.mockClear();
   });
 
-  it('registers status, restart, token rotation, and disconnect channels', () => {
+  it('registers status, connections, restart, token rotation, and disconnect channels', () => {
     const manager = {
       setMainWindow: jest.fn(),
       getStatus: jest.fn(),
       getClientConfigurations: jest.fn(),
+      getConnectionEvents: jest.fn(),
       restart: jest.fn(),
       rotateToken: jest.fn(),
       disconnectClients: jest.fn()
@@ -29,6 +30,7 @@ describe('Bruno MCP preferences IPC', () => {
     expect([...mockHandlers.keys()]).toEqual([
       'renderer:mcp-status',
       'renderer:mcp-client-configs',
+      'renderer:mcp-connections',
       'renderer:mcp-restart',
       'renderer:mcp-rotate-token',
       'renderer:mcp-disconnect-clients'
