@@ -1,3 +1,19 @@
+// The MCP server's workspace directory (mcp/workspace-directory.js) reads the real,
+// electron-store-backed "Manage Workspaces" state (ipc/workspace.js, store/last-opened-workspaces.js,
+// services/snapshot). Give it an isolated userData directory instead of a real Electron app.
+jest.mock('electron', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const mockUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bruno-mcp-userdata-'));
+  return {
+    ipcMain: { handle: jest.fn(), on: jest.fn() },
+    dialog: { showOpenDialog: jest.fn(), showSaveDialog: jest.fn() },
+    app: { getPath: jest.fn(() => mockUserDataDir), getVersion: jest.fn(() => '0.0.0'), isPackaged: false }
+  };
+});
+jest.mock('electron-is-dev', () => false);
+
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
@@ -6,6 +22,8 @@ const { stringifyRequest } = require('@usebruno/filestore');
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
 const { BrunoMcpServerManager } = require('../../src/mcp/server');
+const LastOpenedWorkspaces = require('../../src/store/last-opened-workspaces');
+const { createWorkspaceConfig, writeWorkspaceConfig, getWorkspaceUid } = require('../../src/utils/workspace-config');
 
 const getFreePort = () => new Promise((resolve, reject) => {
   const server = http.createServer();
@@ -56,12 +74,14 @@ const requestDefinition = () => ({
 describe('Bruno collection MCP Streamable HTTP integration', () => {
   let root;
   let workspacePath;
+  let workspaceUid;
   let collectionPath;
   let manager;
   let preferences;
   let token;
   let rotatedToken;
   let requestExecutionService;
+  let lastOpenedWorkspaces;
 
   beforeEach(async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'bruno-mcp-server-'));
@@ -70,13 +90,21 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
     fs.mkdirSync(path.join(collectionPath, 'users'), { recursive: true });
     fs.writeFileSync(path.join(collectionPath, 'bruno.json'), JSON.stringify({ version: '1', name: 'MCP API', type: 'collection' }, null, 2));
     fs.writeFileSync(path.join(collectionPath, 'users', 'get-users.bru'), stringifyRequest(requestDefinition(), { format: 'bru' }));
+
+    // Register the fixture as a real managed workspace, the same way "Open Workspace" does, so
+    // bruno_list_workspaces / resolveWorkspace can find it via the real workspace directory.
+    await writeWorkspaceConfig(workspacePath, createWorkspaceConfig('MCP workspace'));
+    lastOpenedWorkspaces = new LastOpenedWorkspaces();
+    lastOpenedWorkspaces.add(workspacePath);
+    workspaceUid = getWorkspaceUid(workspacePath);
+
     const port = await getFreePort();
     preferences = {
       general: {},
       mcp: {
         enabled: true,
         port,
-        workspaces: [{ uid: 'workspace_mcp', name: 'MCP workspace', path: workspacePath }],
+        workspaces: [{ name: 'Discovery Only', path: path.join(root, 'not-yet-opened') }],
         requestTimeoutMs: 10000,
         maxRequestFiles: 1000
       }
@@ -117,6 +145,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
 
   afterEach(async () => {
     await manager?.stop();
+    lastOpenedWorkspaces.remove(workspacePath);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -139,7 +168,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
       expect(names.some((name) => name.includes('flow'))).toBe(false);
       expect(names.some((name) => name.includes('intelligence'))).toBe(false);
 
-      const collections = parseToolText(await client.callTool({ name: 'bruno_list_collections', arguments: { workspace_uid: 'workspace_mcp' } }));
+      const collections = parseToolText(await client.callTool({ name: 'bruno_list_collections', arguments: { workspace_uid: workspaceUid } }));
       expect(collections.collections).toEqual([expect.objectContaining({ name: 'MCP API', collection_path: 'collections/api' })]);
     } finally {
       await client.close();
@@ -149,7 +178,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   it('returns the complete request and edits name, vars, headers, body, and settings without redaction', async () => {
     const client = await connect(manager.endpoint, token);
     try {
-      const reference = { workspace_uid: 'workspace_mcp', collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
+      const reference = { workspace_uid: workspaceUid, collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
       const current = parseToolText(await client.callTool({ name: 'bruno_get_request', arguments: reference }));
       expect(current.definition.name).toBe('Get users');
       expect(current.definition.request.auth.bearer.token).toBe(requestFixtureValue);
@@ -189,7 +218,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   it('creates and deletes folders, requests, environments, and dotenv data', async () => {
     const client = await connect(manager.endpoint, token);
     try {
-      const collectionReference = { workspace_uid: 'workspace_mcp', collection_path: 'collections/api' };
+      const collectionReference = { workspace_uid: workspaceUid, collection_path: 'collections/api' };
       const folder = parseToolText(await client.callTool({ name: 'bruno_create_folder', arguments: { ...collectionReference, folder_name: 'admin', name: 'Admin' } }));
       expect(folder.definition.meta.name).toBe('Admin');
 
@@ -223,7 +252,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   it('runs POST requests without policy approval and retains complete results for later retrieval', async () => {
     const client = await connect(manager.endpoint, token);
     try {
-      const reference = { workspace_uid: 'workspace_mcp', collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
+      const reference = { workspace_uid: workspaceUid, collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
       parseToolText(await client.callTool({ name: 'bruno_update_request', arguments: { ...reference, set: { 'request.method': 'POST' } } }));
       const started = parseToolText(await client.callTool({ name: 'bruno_run_request', arguments: { ...reference, wait_mode: 'start', runtime_variables: { page: 2 } } }));
       expect(started).toMatchObject({ status: 'running' });
@@ -257,7 +286,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   it('records tool calls for the Connections viewer with source, latency, and a redacted request/response', async () => {
     const client = await connect(manager.endpoint, token);
     try {
-      const reference = { workspace_uid: 'workspace_mcp', collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
+      const reference = { workspace_uid: workspaceUid, collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
       await client.callTool({ name: 'bruno_get_request', arguments: reference });
 
       const events = manager.getConnectionEvents();
@@ -275,7 +304,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   it('reports a failed tool call in the Connections viewer without dropping the error', async () => {
     const client = await connect(manager.endpoint, token);
     try {
-      await client.callTool({ name: 'bruno_get_request', arguments: { workspace_uid: 'workspace_mcp', collection_path: 'collections/api', item_pathname: 'missing/does-not-exist.bru' } });
+      await client.callTool({ name: 'bruno_get_request', arguments: { workspace_uid: workspaceUid, collection_path: 'collections/api', item_pathname: 'missing/does-not-exist.bru' } });
       const call = manager.getConnectionEvents().find((entry) => entry.tool === 'bruno_get_request' && entry.status === 'error');
       expect(call).toBeTruthy();
       expect(call.response).toBeNull();
@@ -292,5 +321,81 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
     expect(manager.getStatus().state).toBe('restarting');
     const status = await restartPromise;
     expect(status.state).toBe('running');
+  });
+
+  it('lists the real managed workspaces, filterable by name, separately from the discovery list', async () => {
+    const client = await connect(manager.endpoint, token);
+    try {
+      const workspaces = parseToolText(await client.callTool({ name: 'bruno_list_workspaces', arguments: {} }));
+      expect(workspaces.workspaces).toEqual([{ uid: workspaceUid, name: 'MCP workspace', path: workspacePath, current: false }]);
+
+      const filtered = parseToolText(await client.callTool({ name: 'bruno_list_workspaces', arguments: { name_ilike: 'nomatch' } }));
+      expect(filtered.workspaces).toEqual([]);
+
+      const discovery = parseToolText(await client.callTool({ name: 'bruno_list_discovery_workspaces', arguments: {} }));
+      expect(discovery.discovery_workspaces).toEqual([expect.objectContaining({ name: 'Discovery Only' })]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('opens and switches to a workspace referenced by path even when it is not yet managed', async () => {
+    const otherWorkspacePath = path.join(root, 'other-workspace');
+    fs.mkdirSync(otherWorkspacePath, { recursive: true });
+    await writeWorkspaceConfig(otherWorkspacePath, createWorkspaceConfig('Other workspace'));
+    const otherWorkspaceUid = getWorkspaceUid(otherWorkspacePath);
+
+    const client = await connect(manager.endpoint, token);
+    try {
+      const result = parseToolText(await client.callTool({ name: 'bruno_list_collections', arguments: { workspace_path: otherWorkspacePath } }));
+      expect(result.workspace_uid).toBe(otherWorkspaceUid);
+
+      const workspaces = parseToolText(await client.callTool({ name: 'bruno_list_workspaces', arguments: {} }));
+      expect(workspaces.workspaces).toEqual(expect.arrayContaining([
+        expect.objectContaining({ uid: workspaceUid, current: false }),
+        expect.objectContaining({ uid: otherWorkspaceUid, name: 'Other workspace', path: otherWorkspacePath, current: true })
+      ]));
+    } finally {
+      await client.close();
+      lastOpenedWorkspaces.remove(otherWorkspacePath);
+    }
+  });
+
+  it('registers a workspace via bruno_add_workspace without switching the active workspace', async () => {
+    const addedWorkspacePath = path.join(root, 'added-workspace');
+    fs.mkdirSync(addedWorkspacePath, { recursive: true });
+    await writeWorkspaceConfig(addedWorkspacePath, createWorkspaceConfig('Added workspace'));
+
+    const client = await connect(manager.endpoint, token);
+    try {
+      const added = parseToolText(await client.callTool({ name: 'bruno_add_workspace', arguments: { workspace_path: addedWorkspacePath } }));
+      expect(added).toMatchObject({ name: 'Added workspace', path: addedWorkspacePath });
+
+      const workspaces = parseToolText(await client.callTool({ name: 'bruno_list_workspaces', arguments: {} }));
+      const addedEntry = workspaces.workspaces.find((entry) => entry.path === addedWorkspacePath);
+      expect(addedEntry).toBeTruthy();
+      expect(addedEntry.current).toBe(false);
+    } finally {
+      await client.close();
+      lastOpenedWorkspaces.remove(addedWorkspacePath);
+    }
+  });
+
+  it('scaffolds a brand-new workspace via bruno_create_workspace', async () => {
+    const client = await connect(manager.endpoint, token);
+    try {
+      const created = parseToolText(await client.callTool({
+        name: 'bruno_create_workspace',
+        arguments: { name: 'Fresh Workspace', location: root, folder_name: 'fresh-workspace' }
+      }));
+      expect(created.name).toBe('Fresh Workspace');
+      expect(fs.existsSync(path.join(created.path, 'workspace.yml'))).toBe(true);
+
+      const workspaces = parseToolText(await client.callTool({ name: 'bruno_list_workspaces', arguments: {} }));
+      expect(workspaces.workspaces.some((entry) => entry.path === created.path)).toBe(true);
+    } finally {
+      await client.close();
+      lastOpenedWorkspaces.remove(path.join(root, 'fresh-workspace'));
+    }
   });
 });

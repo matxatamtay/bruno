@@ -8,6 +8,7 @@ const { McpTokenStore } = require('./token-store');
 const { redactMcpValue, safeMcpError } = require('./redaction');
 const { BrunoMcpAutomationFacade } = require('./automation-facade');
 const { createMcpClientConfigurations } = require('./client-config');
+const { buildWorkspaceDirectory, createWorkspaceActivator, createWorkspaceManager } = require('./workspace-directory');
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const jsonText = (value) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
@@ -48,6 +49,10 @@ const requestClientKey = (request, token) => {
 const commonWorkspaceSchema = {
   workspace_uid: z.string().min(1).optional(),
   workspace_path: z.string().min(1).optional()
+};
+const nameFilterSchema = {
+  name_ilike: z.string().min(1).optional(),
+  name_regex: z.string().min(1).optional()
 };
 const collectionSchema = { ...commonWorkspaceSchema, collection_path: z.string().min(1) };
 const requestReferenceSchema = {
@@ -95,7 +100,14 @@ const registerBrunoMcpTools = (mcp, { facade, onCall }) => {
   };
 
   register('bruno_status', 'Return Bruno Desktop MCP capabilities.', {}, () => facade.status(), { readOnlyHint: true, idempotentHint: true });
-  register('bruno_list_workspaces', 'List workspace roots configured for Bruno MCP discovery. An explicit workspace_path can also be passed directly to every tool.', {}, () => facade.listWorkspaces(), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_list_workspaces', 'List every workspace Bruno currently manages (the same set shown in Manage Workspaces), marking which one is current. Filter by name with name_ilike (case-insensitive substring) and/or name_regex. An explicit workspace_path can also be passed directly to every tool, including a path outside this list — the app will open it and switch to it automatically.', nameFilterSchema, (args) => facade.listWorkspaces(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_list_discovery_workspaces', 'List the workspace paths manually configured in Preferences → MCP for discovery. These are not necessarily open/managed in the app yet; use bruno_add_workspace to bring one into Manage Workspaces. Supports the same name_ilike/name_regex filters as bruno_list_workspaces.', nameFilterSchema, (args) => facade.listDiscoveryWorkspaces(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_add_workspace', 'Register an existing workspace folder (one containing a workspace.yml) into Manage Workspaces, without changing which workspace is currently active.', { workspace_path: z.string().min(1) }, (args) => facade.addWorkspace(args));
+  register('bruno_create_workspace', 'Scaffold a brand-new Bruno workspace in an empty (or new) folder and register it into Manage Workspaces.', {
+    location: z.string().min(1),
+    name: z.string().min(1),
+    folder_name: z.string().optional()
+  }, (args) => facade.createWorkspace(args));
 
   register('bruno_list_collections', 'Find Bruno collections under a workspace.', { ...commonWorkspaceSchema, query: z.string().optional() }, (args) => facade.listCollections(args), { readOnlyHint: true, idempotentHint: true });
   register('bruno_get_collection', 'Get a complete collection definition including overview/config, inherited request settings, every collection settings tab, items, and environments.', collectionSchema, (args) => facade.getCollection(args), { readOnlyHint: true, idempotentHint: true });
@@ -233,18 +245,27 @@ const registerBrunoMcpResources = (mcp, facade) => {
 };
 
 class BrunoMcpServerManager {
-  constructor({ appDataPath, getPreferences, savePreferences, requestExecutionService, mainWindow = null, tokenStore, stdioLaunch, now = () => new Date() } = {}) {
+  constructor({ appDataPath, getPreferences, savePreferences, requestExecutionService, mainWindow = null, workspaceWatcher = null, tokenStore, stdioLaunch, now = () => new Date() } = {}) {
     this.appDataPath = appDataPath;
     this.getPreferences = getPreferences;
     this.savePreferences = savePreferences;
     this.mainWindow = mainWindow;
+    this.workspaceWatcher = workspaceWatcher;
     this.now = now;
     this.server = null;
     this.startedAt = null;
     this.config = normalizeMcpConfig(getPreferences());
     this.tokenStore = tokenStore || new McpTokenStore({ directory: `${appDataPath}/bruno-mcp` });
     this.stdioLaunch = stdioLaunch || { command: process.execPath, args: ['--mcp-stdio'] };
-    this.facade = new BrunoMcpAutomationFacade({ requestExecutionService, configProvider: () => this.config, now });
+    const getMainWindow = () => this.mainWindow;
+    const configProvider = () => ({ ...this.config, workspaces: buildWorkspaceDirectory() });
+    this.facade = new BrunoMcpAutomationFacade({
+      requestExecutionService,
+      configProvider,
+      now,
+      onWorkspaceResolved: createWorkspaceActivator({ getMainWindow, workspaceWatcher: this.workspaceWatcher }),
+      workspaceManager: createWorkspaceManager({ getMainWindow, workspaceWatcher: this.workspaceWatcher, configProvider })
+    });
     this.clients = new Map();
     this.activeToken = null;
     this.lastError = null;
@@ -457,7 +478,7 @@ class BrunoMcpServerManager {
       endpoint: this.endpoint,
       host: this.config.host,
       port: this.config.port,
-      workspaceCount: this.config.workspaces.length,
+      workspaceCount: buildWorkspaceDirectory().length,
       connectedClients: this.clients.size,
       startedAt: this.startedAt,
       error: this.lastError?.message || null

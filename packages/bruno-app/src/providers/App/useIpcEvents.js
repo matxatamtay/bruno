@@ -31,7 +31,8 @@ import {
   workspaceOpenedEvent,
   workspaceConfigUpdatedEvent,
   hydrateSnapshotForOpenedCollection,
-  restoreActiveWorkspaceFromSnapshot
+  restoreActiveWorkspaceFromSnapshot,
+  switchWorkspace
 } from 'providers/ReduxStore/slices/workspaces/actions';
 import { workspaceDotEnvUpdateEvent, setWorkspaceDotEnvVariables } from 'providers/ReduxStore/slices/workspaces';
 import toast from 'react-hot-toast';
@@ -160,6 +161,10 @@ const useIpcEvents = () => {
     const removeOpenWorkspaceListener = ipcRenderer.on('main:workspace-opened', (workspacePath, workspaceUid, workspaceConfig) => {
       dispatch(workspaceOpenedEvent(workspacePath, workspaceUid, workspaceConfig));
       dispatch(openWorkspaceFlowCatalog({ workspaceUid, workspacePath }));
+    });
+
+    const removeMcpWorkspaceSwitchedListener = ipcRenderer.on('main:mcp-workspace-switched', ({ workspaceUid }) => {
+      dispatch(switchWorkspace(workspaceUid));
     });
 
     const removeWorkspacesReadyListener = ipcRenderer.on('main:workspaces-ready', () => {
@@ -427,6 +432,7 @@ const useIpcEvents = () => {
       removeApiSpecTreeUpdateListener();
       removeOpenCollectionListener();
       removeOpenWorkspaceListener();
+      removeMcpWorkspaceSwitchedListener();
       removeWorkspacesReadyListener();
       removeWorkspaceConfigUpdatedListener();
       removeWorkspaceEnvironmentAddedListener();

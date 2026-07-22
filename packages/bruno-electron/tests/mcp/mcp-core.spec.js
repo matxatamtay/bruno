@@ -22,18 +22,19 @@ describe('Bruno MCP core', () => {
         allowedWorkspaces: [{ uid: 'workspace_api', path: '/tmp/api' }]
       }
     });
-    expect(config).toMatchObject({ enabled: true, host: '127.0.0.1', workspaces: [{ uid: 'workspace_api', path: path.resolve('/tmp/api') }] });
+    expect(config).toMatchObject({ enabled: true, host: '127.0.0.1', discoveryWorkspaces: [{ uid: 'workspace_api', path: path.resolve('/tmp/api') }] });
     expect(config).not.toHaveProperty('permissionProfile');
     expect(config).not.toHaveProperty('allowedHosts');
     expect(config).not.toHaveProperty('allowPrivateHosts');
   });
 
-  it('uses configured workspace paths for discovery rather than authorization', () => {
+  it('treats configured workspace paths as a discovery list, not the real managed workspaces', () => {
     const config = normalizeMcpConfig({ mcp: { workspaces: ['/tmp/one', { name: 'Two', path: '/tmp/two' }] } });
-    expect(config.workspaces).toEqual([
+    expect(config.discoveryWorkspaces).toEqual([
       expect.objectContaining({ name: 'one', path: path.resolve('/tmp/one') }),
       expect.objectContaining({ name: 'Two', path: path.resolve('/tmp/two') })
     ]);
+    expect(config).not.toHaveProperty('workspaces');
   });
 
   it('does not gate dynamic, private, or mutation request URLs', () => {
