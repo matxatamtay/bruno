@@ -9,6 +9,7 @@ import Cookies from 'components/Cookies';
 import Notifications from 'components/Notifications';
 import Portal from 'components/Portal';
 import ThemeDropdown from './ThemeDropdown';
+import McpStatus from './McpStatus';
 import { openConsole } from 'providers/ReduxStore/slices/logs';
 import { addTab } from 'providers/ReduxStore/slices/tabs';
 import { useApp } from 'providers/App';
@@ -162,6 +163,10 @@ const StatusBar = () => {
                 )}
               </div>
             </button>
+
+            <div className="status-bar-divider"></div>
+
+            <McpStatus />
 
             <div className="status-bar-divider"></div>
 

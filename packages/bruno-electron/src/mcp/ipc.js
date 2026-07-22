@@ -18,6 +18,7 @@ const registerMcpIpc = (mainWindow, manager) => {
   manager.setMainWindow(mainWindow);
   ipcMain.handle('renderer:mcp-status', () => envelope(() => manager.getStatus()));
   ipcMain.handle('renderer:mcp-client-configs', () => envelope(() => manager.getClientConfigurations()));
+  ipcMain.handle('renderer:mcp-connections', () => envelope(() => manager.getConnectionEvents()));
   ipcMain.handle('renderer:mcp-restart', () => envelope(() => manager.restart()));
   ipcMain.handle('renderer:mcp-rotate-token', (event, { reveal = true } = {}) => envelope(() => manager.rotateToken({ reveal })));
   ipcMain.handle('renderer:mcp-disconnect-clients', () => envelope(() => manager.disconnectClients()));

@@ -253,4 +253,44 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
     const client = await connect(manager.endpoint, rotatedToken);
     await client.close();
   });
+
+  it('records tool calls for the Connections viewer with source, latency, and a redacted request/response', async () => {
+    const client = await connect(manager.endpoint, token);
+    try {
+      const reference = { workspace_uid: 'workspace_mcp', collection_path: 'collections/api', item_pathname: 'users/get-users.bru' };
+      await client.callTool({ name: 'bruno_get_request', arguments: reference });
+
+      const events = manager.getConnectionEvents();
+      const call = events.find((entry) => entry.tool === 'bruno_get_request');
+      expect(call).toMatchObject({ tool: 'bruno_get_request', status: 'success', error: null });
+      expect(call.source).toMatch(/^127\.0\.0\.1:\d+$/);
+      expect(typeof call.durationMs).toBe('number');
+      expect(call.request).toMatchObject(reference);
+      expect(call.response.definition.request.auth.bearer.token).toBe('[REDACTED]');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('reports a failed tool call in the Connections viewer without dropping the error', async () => {
+    const client = await connect(manager.endpoint, token);
+    try {
+      await client.callTool({ name: 'bruno_get_request', arguments: { workspace_uid: 'workspace_mcp', collection_path: 'collections/api', item_pathname: 'missing/does-not-exist.bru' } });
+      const call = manager.getConnectionEvents().find((entry) => entry.tool === 'bruno_get_request' && entry.status === 'error');
+      expect(call).toBeTruthy();
+      expect(call.response).toBeNull();
+      expect(call.error).toMatchObject({ code: expect.any(String) });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('reports a restarting state while cycling the server', async () => {
+    expect(manager.getStatus().state).toBe('running');
+    const restartPromise = manager.restart();
+    await Promise.resolve(); // let the queued restart begin running before asserting the transient state
+    expect(manager.getStatus().state).toBe('restarting');
+    const status = await restartPromise;
+    expect(status.state).toBe('running');
+  });
 });

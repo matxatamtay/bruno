@@ -21,6 +21,7 @@ const StyledWrapper = styled.div`
   .mcp-icon-button { border: 0; background: transparent; color: ${(props) => props.theme.colors.text.muted}; cursor: pointer; padding: 5px; }
   .online { color: ${(props) => props.theme.colors.text.green} !important; }
   .offline { color: ${(props) => props.theme.colors.text.muted}; }
+  .restarting { color: ${(props) => props.theme.colors.text.warning || props.theme.colors.text.muted} !important; }
   .mcp-status-list { margin: 12px 0; }
   .mcp-status-list > div { display: grid; grid-template-columns: 110px 1fr; gap: 8px; padding: 5px 0; border-top: 1px dashed ${(props) => props.theme.input.border}; }
   .mcp-status-list dt { color: ${(props) => props.theme.colors.text.muted}; }

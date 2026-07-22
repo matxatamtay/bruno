@@ -24,9 +24,12 @@ const initialPreferences = {
 };
 
 const clientConfigs = {
-  codex: { configPath: '~/.codex/config.toml', snippet: '[mcp_servers.bruno]\ncommand = "/Applications/Bruno.app/Contents/MacOS/Bruno"' },
-  claudeDesktop: { configPath: '~/Library/Application Support/Claude/claude_desktop_config.json', snippet: '{"mcpServers":{"bruno":{"command":"Bruno","args":["--mcp-stdio"]}}}' },
-  claudeCode: { configPath: '.mcp.json', snippet: '{"mcpServers":{"bruno":{"command":"Bruno","args":["--mcp-stdio"]}}}' }
+  transport: 'http',
+  endpoint: 'http://127.0.0.1:3847/mcp',
+  tokenEnvVar: 'BRUNO_MCP_TOKEN',
+  codex: { configPath: '~/.codex/config.toml', snippet: '[mcp_servers.bruno]\nurl = "http://127.0.0.1:3847/mcp"\nbearer_token_env_var = "BRUNO_MCP_TOKEN"' },
+  claudeDesktop: { configPath: '~/Library/Application Support/Claude/claude_desktop_config.json', snippet: '{"mcpServers":{"bruno":{"command":"npx","args":["-y","mcp-remote","http://127.0.0.1:3847/mcp","--allow-http","--header","Authorization:${BRUNO_MCP_TOKEN}"],"env":{"BRUNO_MCP_TOKEN":"Bearer <paste-your-bruno-mcp-token-here>"}}}}' },
+  claudeCode: { configPath: '.mcp.json', snippet: '{"mcpServers":{"bruno":{"type":"http","url":"http://127.0.0.1:3847/mcp","headers":{"Authorization":"Bearer ${BRUNO_MCP_TOKEN}"}}}}' }
 };
 
 const renderMcp = (invoke) => {
@@ -90,7 +93,7 @@ describe('Bruno MCP Preferences', () => {
     expect(invoke).toHaveBeenCalledWith('renderer:mcp-rotate-token', { reveal: true });
   });
 
-  it('shows copy-ready Codex and Claude stdio configurations without a token', async () => {
+  it('shows copy-ready Codex, Claude Code, and Claude Desktop configurations without a raw token', async () => {
     const writeText = jest.fn(async () => undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     const invoke = jest.fn(async (channel) => ({
@@ -100,7 +103,8 @@ describe('Bruno MCP Preferences', () => {
     renderMcp(invoke);
 
     expect(await screen.findByText('[mcp_servers.bruno]', { exact: false })).toBeInTheDocument();
-    expect(screen.getByText(/Claude Desktop \/ Claude Code/)).toBeInTheDocument();
+    expect(screen.getByText('Claude Code')).toBeInTheDocument();
+    expect(screen.getByText('Claude Desktop')).toBeInTheDocument();
     expect(screen.queryByText(/shown-once-value/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /Copy Codex config/i }));
