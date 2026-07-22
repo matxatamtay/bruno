@@ -567,6 +567,7 @@ app.on('ready', async () => {
     savePreferences,
     requestExecutionService: automationServices.requestExecutionService,
     mainWindow,
+    workspaceWatcher,
     stdioLaunch: {
       command: isLinux && process.env.APPIMAGE ? process.env.APPIMAGE : process.execPath,
       args: app.isPackaged ? ['--mcp-stdio'] : [app.getAppPath(), '--mcp-stdio']

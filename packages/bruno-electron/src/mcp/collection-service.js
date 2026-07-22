@@ -26,6 +26,7 @@ const {
 const { generateUidBasedOnHash, stringifyJson } = require('../utils/common');
 const { transformBrunoConfigBeforeSave, transformBrunoConfigAfterRead } = require('../utils/transformBrunoConfig');
 const EnvironmentSecretsStore = require('../store/env-secrets');
+const { filterByName } = require('./name-filter');
 
 const REQUEST_TYPES = new Set(['http-request', 'graphql-request', 'grpc-request', 'ws-request']);
 const ROOT_FILES = new Set(['bruno.json', 'collection.bru', 'opencollection.yml']);
@@ -186,36 +187,47 @@ const folderTabPaths = {
 };
 
 class BrunoCollectionService {
-  constructor({ configProvider }) {
+  constructor({ configProvider, onWorkspaceResolved }) {
     this.configProvider = configProvider;
+    this.onWorkspaceResolved = onWorkspaceResolved;
   }
 
   getConfig() {
     return this.configProvider?.() || {};
   }
 
-  listWorkspaces() {
-    return (this.getConfig().workspaces || this.getConfig().allowedWorkspaces || []).map((workspace) => ({ ...workspace }));
+  listWorkspaces(input = {}) {
+    const workspaces = (this.getConfig().workspaces || []).map((workspace) => ({ ...workspace }));
+    return filterByName(workspaces, input);
   }
 
-  resolveWorkspace({ workspace_uid: workspaceUid, workspace_path: workspacePath } = {}) {
-    const configured = this.listWorkspaces();
+  async resolveWorkspace({ workspace_uid: workspaceUid, workspace_path: workspacePath } = {}) {
+    const known = this.listWorkspaces();
+    let workspace;
     if (workspacePath) {
       const pathname = path.resolve(workspacePath);
-      const configuredEntry = configured.find((workspace) => path.resolve(workspace.path) === pathname);
-      return configuredEntry || { uid: generateUidBasedOnHash(pathname), name: path.basename(pathname), path: pathname };
-    }
-    if (workspaceUid) {
-      const found = configured.find((workspace) => workspace.uid === workspaceUid);
-      if (found) return found;
-      const error = new Error(`Workspace ${workspaceUid} was not found`);
-      error.code = 'BRUNO_MCP_WORKSPACE_NOT_FOUND';
+      const knownEntry = known.find((candidate) => path.resolve(candidate.path) === pathname);
+      workspace = knownEntry || { uid: generateUidBasedOnHash(pathname), name: path.basename(pathname), path: pathname };
+    } else if (workspaceUid) {
+      workspace = known.find((candidate) => candidate.uid === workspaceUid);
+      if (!workspace) {
+        const error = new Error(`Workspace ${workspaceUid} was not found`);
+        error.code = 'BRUNO_MCP_WORKSPACE_NOT_FOUND';
+        throw error;
+      }
+    } else if (known.length === 1) {
+      workspace = known[0];
+    } else {
+      const error = new Error('workspace_path or workspace_uid is required when multiple workspaces are configured');
+      error.code = 'BRUNO_MCP_WORKSPACE_REQUIRED';
       throw error;
     }
-    if (configured.length === 1) return configured[0];
-    const error = new Error('workspace_path or workspace_uid is required when multiple workspaces are configured');
-    error.code = 'BRUNO_MCP_WORKSPACE_REQUIRED';
-    throw error;
+    if (this.onWorkspaceResolved) {
+      await this.onWorkspaceResolved(workspace).catch((error) => {
+        console.error('Bruno MCP failed to activate workspace:', error?.message || error);
+      });
+    }
+    return workspace;
   }
 
   resolveCollection(workspace, collectionPath) {
@@ -238,7 +250,7 @@ class BrunoCollectionService {
   }
 
   async listCollections(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const paths = await scanForBrunoFiles(workspace.path);
     const query = String(input.query || '').trim().toLowerCase();
     const collections = [];
@@ -295,7 +307,7 @@ class BrunoCollectionService {
   }
 
   async getCollection(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const document = await this.readCollectionDocument(collectionPath);
     const tree = await this.listItems({ ...input, workspace_path: workspace.path, collection_path: collectionPath });
@@ -315,7 +327,7 @@ class BrunoCollectionService {
   }
 
   async createCollection(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const parentPath = path.resolve(input.location || workspace.path);
     const folderName = sanitizeName(String(input.folder_name || input.name || 'collection'));
     if (!folderName || !validateName(folderName)) throw new Error(`${folderName || 'Collection'} is not a valid folder name`);
@@ -334,7 +346,7 @@ class BrunoCollectionService {
   }
 
   async updateCollection(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const current = await this.readCollectionDocument(collectionPath);
     const source = { root: current.root, brunoConfig: current.brunoConfig };
@@ -361,7 +373,7 @@ class BrunoCollectionService {
   }
 
   async cloneCollection(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const sourcePath = this.resolveCollection(workspace, input.collection_path);
     const targetLocation = path.resolve(input.target_location || workspace.path);
     const folderName = sanitizeName(String(input.folder_name || `${path.basename(sourcePath)}-copy`));
@@ -377,7 +389,7 @@ class BrunoCollectionService {
   }
 
   async moveCollection(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const sourcePath = this.resolveCollection(workspace, input.collection_path);
     const targetLocation = path.resolve(input.target_location || path.dirname(sourcePath));
     const folderName = sanitizeName(String(input.folder_name || path.basename(sourcePath)));
@@ -399,7 +411,7 @@ class BrunoCollectionService {
   }
 
   async deleteCollection(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     if (!await exists(collectionPath)) throw new Error(`Collection ${collectionPath} does not exist`);
     await fsPromises.rm(collectionPath, { recursive: true, force: true });
@@ -407,7 +419,7 @@ class BrunoCollectionService {
   }
 
   async resequenceItems(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const format = getCollectionFormat(collectionPath);
     const results = [];
@@ -433,7 +445,7 @@ class BrunoCollectionService {
   }
 
   async listItems(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const format = getCollectionFormat(collectionPath);
     const extension = format === 'yml' ? '.yml' : '.bru';
@@ -485,7 +497,7 @@ class BrunoCollectionService {
   }
 
   async getFolder(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const folderPath = assertInside(collectionPath, path.resolve(collectionPath, input.folder_path || ''), 'Folder path');
     const format = getCollectionFormat(collectionPath);
@@ -495,7 +507,7 @@ class BrunoCollectionService {
   }
 
   async createFolder(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const parent = assertInside(collectionPath, path.resolve(collectionPath, input.parent_path || ''), 'Folder parent');
     const folderName = sanitizeName(String(input.folder_name || input.name || 'folder'));
@@ -529,7 +541,7 @@ class BrunoCollectionService {
   }
 
   async listRequests(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collections = input.collection_path
       ? [{ collection_path: input.collection_path }]
       : (await this.listCollections({ workspace_path: workspace.path })).collections;
@@ -578,7 +590,7 @@ class BrunoCollectionService {
   }
 
   async readRequest(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const requestPath = assertInside(collectionPath, path.resolve(collectionPath, input.item_pathname || ''), 'Request path');
     if (!await exists(requestPath)) throw new Error(`Request ${input.item_pathname} does not exist`);
@@ -600,7 +612,7 @@ class BrunoCollectionService {
   }
 
   async createRequest(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const format = getCollectionFormat(collectionPath);
     const parent = assertInside(collectionPath, path.resolve(collectionPath, input.folder_path || ''), 'Request folder');
@@ -673,7 +685,7 @@ class BrunoCollectionService {
   }
 
   async moveItem(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const source = assertInside(collectionPath, path.resolve(collectionPath, input.source_path), 'Source path');
     const targetDirectory = assertInside(collectionPath, path.resolve(collectionPath, input.target_folder || ''), 'Target folder');
@@ -686,7 +698,7 @@ class BrunoCollectionService {
   }
 
   async listEnvironments(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const format = getCollectionFormat(collectionPath);
     const directory = path.join(collectionPath, 'environments');
@@ -719,7 +731,7 @@ class BrunoCollectionService {
   }
 
   async createEnvironment(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const format = getCollectionFormat(collectionPath);
     const directory = path.join(collectionPath, 'environments');
@@ -736,7 +748,7 @@ class BrunoCollectionService {
 
   async updateEnvironment(input = {}) {
     const current = await this.getEnvironment(input);
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const format = getCollectionFormat(collectionPath);
     const next = applyMutation(current.environment.definition, input);
@@ -756,7 +768,7 @@ class BrunoCollectionService {
 
   async deleteEnvironment(input = {}) {
     const current = await this.getEnvironment(input);
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     await fsPromises.unlink(path.join(collectionPath, 'environments', current.environment.filename));
     environmentSecretsStore.deleteEnvironment(collectionPath, current.environment.name);
@@ -764,7 +776,7 @@ class BrunoCollectionService {
   }
 
   async getDotEnv(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const filename = String(input.filename || '.env');
     const pathname = assertInside(collectionPath, path.join(collectionPath, filename), 'Dotenv path');
@@ -773,7 +785,7 @@ class BrunoCollectionService {
   }
 
   async setDotEnv(input = {}) {
-    const workspace = this.resolveWorkspace(input);
+    const workspace = await this.resolveWorkspace(input);
     const collectionPath = this.resolveCollection(workspace, input.collection_path);
     const filename = String(input.filename || '.env');
     if (!/^\.env(?:\.[A-Za-z0-9_-]+)?$/.test(filename)) throw new Error('Invalid dotenv filename');

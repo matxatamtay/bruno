@@ -20,21 +20,15 @@ const normalizeWorkspaceEntry = (entry) => {
 
 const normalizeMcpConfig = (preferences = {}) => {
   const source = preferences?.mcp || preferences || {};
-  const defaultWorkspacePath = preferences?.general?.defaultWorkspacePath || preferences?.general?.defaultLocation || '';
   const configured = Array.isArray(source.workspaces)
     ? source.workspaces
     : (Array.isArray(source.allowedWorkspaces) ? source.allowedWorkspaces : []);
-  const workspaces = configured.map(normalizeWorkspaceEntry).filter(Boolean);
-  if (workspaces.length === 0 && defaultWorkspacePath) {
-    const fallback = normalizeWorkspaceEntry(defaultWorkspacePath);
-    if (fallback) workspaces.push(fallback);
-  }
+  const discoveryWorkspaces = configured.map(normalizeWorkspaceEntry).filter(Boolean);
   return {
     enabled: source.enabled === true,
     host: '127.0.0.1',
     port: Math.max(1, Math.min(65535, Number(source.port) || 3847)),
-    workspaces,
-    allowedWorkspaces: workspaces,
+    discoveryWorkspaces,
     requestTimeoutMs: Math.max(1_000, Math.min(600_000, Number(source.requestTimeoutMs) || 120_000)),
     maxRequestFiles: Math.max(100, Math.min(100_000, Number(source.maxRequestFiles) || 20_000))
   };

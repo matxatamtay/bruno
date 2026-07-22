@@ -51,85 +51,91 @@ const prepareWorkspaceConfigForClient = (workspaceConfig, workspacePath, isDefau
   return config;
 };
 
+// Shared with mcp/workspace-directory.js so MCP tools can open/create workspaces the same way
+// the renderer IPC handlers below do, instead of duplicating this logic.
+const createWorkspace = async ({ mainWindow, workspaceWatcher, lastOpenedWorkspaces }, { name: workspaceName, folderName: workspaceFolderName, location: workspaceLocation }) => {
+  const sanitizedFolderName = sanitizeName(workspaceFolderName);
+  const dirPath = path.join(workspaceLocation, sanitizedFolderName);
+
+  if (fs.existsSync(dirPath)) {
+    const files = fs.readdirSync(dirPath);
+    if (files.length > 0) {
+      throw new Error(`workspace: ${dirPath} already exists and is not empty`);
+    }
+  }
+
+  validateWorkspaceDirectory(dirPath);
+
+  if (!fs.existsSync(dirPath)) {
+    await createDirectory(dirPath);
+  }
+
+  await createDirectory(path.join(dirPath, 'collections'));
+
+  const workspaceUid = getWorkspaceUid(dirPath);
+  const isDefault = workspaceUid === 'default';
+  const workspaceConfig = createWorkspaceConfig(workspaceName);
+
+  await writeWorkspaceConfig(dirPath, workspaceConfig);
+  await writeFile(path.join(dirPath, '.gitignore'), DEFAULT_GITIGNORE);
+
+  lastOpenedWorkspaces.add(dirPath);
+
+  const configForClient = prepareWorkspaceConfigForClient(workspaceConfig, dirPath, isDefault);
+
+  if (mainWindow && !mainWindow.isDestroyed?.()) {
+    mainWindow.webContents.send('main:workspace-opened', dirPath, workspaceUid, configForClient);
+    if (workspaceWatcher) {
+      workspaceWatcher.addWatcher(mainWindow, dirPath);
+    }
+  }
+
+  return {
+    workspaceConfig: configForClient,
+    workspaceUid,
+    workspacePath: dirPath
+  };
+};
+
+const openWorkspace = async ({ mainWindow, workspaceWatcher, lastOpenedWorkspaces }, workspacePath) => {
+  validateWorkspacePath(workspacePath);
+
+  const workspaceConfig = readWorkspaceConfig(workspacePath);
+  validateWorkspaceConfig(workspaceConfig);
+
+  const workspaceUid = getWorkspaceUid(workspacePath);
+  const isDefault = workspaceUid === 'default';
+  const configForClient = prepareWorkspaceConfigForClient(workspaceConfig, workspacePath, isDefault);
+
+  lastOpenedWorkspaces.add(workspacePath);
+
+  if (mainWindow && !mainWindow.isDestroyed?.()) {
+    mainWindow.webContents.send('main:workspace-opened', workspacePath, workspaceUid, configForClient);
+    if (workspaceWatcher) {
+      workspaceWatcher.addWatcher(mainWindow, workspacePath);
+    }
+  }
+
+  return {
+    workspaceConfig: configForClient,
+    workspaceUid,
+    workspacePath
+  };
+};
+
 const registerWorkspaceIpc = (mainWindow, workspaceWatcher) => {
   const lastOpenedWorkspaces = new LastOpenedWorkspaces();
 
   ipcMain.handle('renderer:create-workspace',
-    async (event, workspaceName, workspaceFolderName, workspaceLocation) => {
-      try {
-        workspaceFolderName = sanitizeName(workspaceFolderName);
-        const dirPath = path.join(workspaceLocation, workspaceFolderName);
+    async (event, workspaceName, workspaceFolderName, workspaceLocation) => createWorkspace(
+      { mainWindow, workspaceWatcher, lastOpenedWorkspaces },
+      { name: workspaceName, folderName: workspaceFolderName, location: workspaceLocation }
+    ));
 
-        if (fs.existsSync(dirPath)) {
-          const files = fs.readdirSync(dirPath);
-          if (files.length > 0) {
-            throw new Error(`workspace: ${dirPath} already exists and is not empty`);
-          }
-        }
-
-        validateWorkspaceDirectory(dirPath);
-
-        if (!fs.existsSync(dirPath)) {
-          await createDirectory(dirPath);
-        }
-
-        await createDirectory(path.join(dirPath, 'collections'));
-
-        const workspaceUid = getWorkspaceUid(dirPath);
-        const isDefault = workspaceUid === 'default';
-        const workspaceConfig = createWorkspaceConfig(workspaceName);
-
-        await writeWorkspaceConfig(dirPath, workspaceConfig);
-        await writeFile(path.join(dirPath, '.gitignore'), DEFAULT_GITIGNORE);
-
-        lastOpenedWorkspaces.add(dirPath);
-
-        const configForClient = prepareWorkspaceConfigForClient(workspaceConfig, dirPath, isDefault);
-
-        mainWindow.webContents.send('main:workspace-opened', dirPath, workspaceUid, configForClient);
-
-        if (workspaceWatcher) {
-          workspaceWatcher.addWatcher(mainWindow, dirPath);
-        }
-
-        return {
-          workspaceConfig: configForClient,
-          workspaceUid,
-          workspacePath: dirPath
-        };
-      } catch (error) {
-        throw error;
-      }
-    });
-
-  ipcMain.handle('renderer:open-workspace', async (event, workspacePath) => {
-    try {
-      validateWorkspacePath(workspacePath);
-
-      const workspaceConfig = readWorkspaceConfig(workspacePath);
-      validateWorkspaceConfig(workspaceConfig);
-
-      const workspaceUid = getWorkspaceUid(workspacePath);
-      const isDefault = workspaceUid === 'default';
-      const configForClient = prepareWorkspaceConfigForClient(workspaceConfig, workspacePath, isDefault);
-
-      lastOpenedWorkspaces.add(workspacePath);
-
-      mainWindow.webContents.send('main:workspace-opened', workspacePath, workspaceUid, configForClient);
-
-      if (workspaceWatcher) {
-        workspaceWatcher.addWatcher(mainWindow, workspacePath);
-      }
-
-      return {
-        workspaceConfig: configForClient,
-        workspaceUid,
-        workspacePath
-      };
-    } catch (error) {
-      throw error;
-    }
-  });
+  ipcMain.handle('renderer:open-workspace', async (event, workspacePath) => openWorkspace(
+    { mainWindow, workspaceWatcher, lastOpenedWorkspaces },
+    workspacePath
+  ));
 
   ipcMain.handle('renderer:open-workspace-dialog', async (event) => {
     try {
@@ -709,3 +715,6 @@ const registerWorkspaceIpc = (mainWindow, workspaceWatcher) => {
 };
 
 module.exports = registerWorkspaceIpc;
+module.exports.createWorkspace = createWorkspace;
+module.exports.openWorkspace = openWorkspace;
+module.exports.DEFAULT_WORKSPACE_NAME = DEFAULT_WORKSPACE_NAME;

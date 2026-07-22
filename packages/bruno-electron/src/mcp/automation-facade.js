@@ -72,13 +72,14 @@ class McpRequestRunRepository {
 }
 
 class BrunoMcpAutomationFacade {
-  constructor({ requestExecutionService, configProvider, idFactory = randomUUID, now = () => new Date() } = {}) {
+  constructor({ requestExecutionService, configProvider, onWorkspaceResolved, workspaceManager, idFactory = randomUUID, now = () => new Date() } = {}) {
     if (!requestExecutionService) throw new TypeError('BrunoMcpAutomationFacade requires requestExecutionService');
     this.requestExecutionService = requestExecutionService;
     this.configProvider = configProvider;
+    this.workspaceManager = workspaceManager;
     this.idFactory = idFactory;
     this.now = now;
-    this.collections = new BrunoCollectionService({ configProvider });
+    this.collections = new BrunoCollectionService({ configProvider, onWorkspaceResolved });
     this.requestContextResolver = new BrunoRequestContextResolver();
     this.requestRuns = new McpRequestRunRepository({ now });
   }
@@ -109,7 +110,10 @@ class BrunoMcpAutomationFacade {
     };
   }
 
-  listWorkspaces() { return { workspaces: this.collections.listWorkspaces() }; }
+  listWorkspaces(input) { return { workspaces: this.collections.listWorkspaces(input) }; }
+  listDiscoveryWorkspaces(input) { return this.workspaceManager.listDiscoveryWorkspaces(input); }
+  addWorkspace(input) { return this.workspaceManager.addWorkspace(input); }
+  createWorkspace(input) { return this.workspaceManager.createWorkspace(input); }
   listCollections(input) { return this.collections.listCollections(input); }
   getCollection(input) { return this.collections.getCollection(input); }
   createCollection(input) { return this.collections.createCollection(input); }
@@ -144,7 +148,7 @@ class BrunoMcpAutomationFacade {
   duplicateRequest(input) { return this.collections.duplicateRequest(input); }
 
   async resolveRequestContext(input = {}) {
-    const workspace = this.collections.resolveWorkspace(input);
+    const workspace = await this.collections.resolveWorkspace(input);
     const request = await this.collections.getRequest({ ...input, workspace_path: workspace.path });
     const context = await this.requestContextResolver.resolve({
       workspace,
