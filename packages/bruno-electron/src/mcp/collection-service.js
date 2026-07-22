@@ -39,6 +39,16 @@ const exists = async (pathname) => fsPromises.access(pathname).then(() => true).
   throw error;
 });
 
+// OpenCollection does not persist top-level UIDs, so parser-generated values are transient.
+const resolveDocumentUid = (definition, pathname, format) => {
+  const uid = format === 'yml'
+    ? generateUidBasedOnHash(path.resolve(pathname))
+    : definition.uid || generateUidBasedOnHash(path.resolve(pathname));
+
+  if (format === 'yml') definition.uid = uid;
+  return uid;
+};
+
 const isInside = (parent, child) => {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -478,7 +488,7 @@ class BrunoCollectionService {
           const definition = parseRequest(await fsPromises.readFile(pathname, 'utf8'), { format });
           if (!REQUEST_TYPES.has(definition.type) && definition.type !== 'app') continue;
           output.push({
-            uid: definition.uid || generateUidBasedOnHash(pathname),
+            uid: resolveDocumentUid(definition, pathname, format),
             type: definition.type,
             name: definition.name || path.basename(entry.name, extension),
             seq: definition.seq || null,
@@ -596,6 +606,7 @@ class BrunoCollectionService {
     if (!await exists(requestPath)) throw new Error(`Request ${input.item_pathname} does not exist`);
     const format = getCollectionFormat(collectionPath);
     const definition = parseRequest(await fsPromises.readFile(requestPath, 'utf8'), { format });
+    const uid = resolveDocumentUid(definition, requestPath, format);
     return {
       workspace_uid: workspace.uid,
       workspace_path: workspace.path,
@@ -604,7 +615,7 @@ class BrunoCollectionService {
       item_pathname: posixify(path.relative(collectionPath, requestPath)),
       pathname: requestPath,
       format,
-      uid: definition.uid || generateUidBasedOnHash(requestPath),
+      uid,
       name: definition.name,
       type: definition.type,
       definition
@@ -706,7 +717,9 @@ class BrunoCollectionService {
     const files = (await fsPromises.readdir(directory)).filter((name) => name.endsWith(`.${format}`)).sort();
     const environments = [];
     for (const filename of files) {
-      const definition = parseEnvironment(await fsPromises.readFile(path.join(directory, filename), 'utf8'), { format });
+      const pathname = path.join(directory, filename);
+      const definition = parseEnvironment(await fsPromises.readFile(pathname, 'utf8'), { format });
+      const uid = resolveDocumentUid(definition, pathname, format);
       try {
         const secrets = environmentSecretsStore.getEnvSecrets(collectionPath, definition) || [];
         secrets.forEach((secret) => {
@@ -716,7 +729,7 @@ class BrunoCollectionService {
       } catch (_) {
         // Return the file definition even when the desktop secret store is unavailable.
       }
-      environments.push({ uid: definition.uid || generateUidBasedOnHash(path.join(directory, filename)), name: definition.name || path.basename(filename, `.${format}`), filename, definition });
+      environments.push({ uid, name: definition.name || path.basename(filename, `.${format}`), filename, definition });
     }
     return { workspace_uid: workspace.uid, collection_path: input.collection_path, environments };
   }

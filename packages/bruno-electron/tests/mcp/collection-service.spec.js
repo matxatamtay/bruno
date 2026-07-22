@@ -117,6 +117,43 @@ describe('BrunoCollectionService', () => {
     expect((await service.getRequest({ ...collection, item_pathname: 'ws.bru' })).definition.request.body.ws[0].name).toBe('Subscribe');
   });
 
+  it('keeps OpenCollection request and environment UIDs stable across reads and searches', async () => {
+    await service.createCollection({ workspace_uid: 'workspace_service', name: 'YAML API', folder_name: 'yaml-api', format: 'yml' });
+    const collection = { workspace_uid: 'workspace_service', collection_path: 'yaml-api' };
+
+    const createdRequest = await service.createRequest({
+      ...collection,
+      name: 'Get users',
+      filename: 'get-users',
+      method: 'GET',
+      url: 'https://api.test/users'
+    });
+    const requestUid = createdRequest.uid;
+    expect(createdRequest.definition.uid).toBe(requestUid);
+
+    const requestByUid = await service.getRequest({ ...collection, request_uid: requestUid });
+    const listedRequests = await service.listRequests(collection);
+    const searchedRequests = await service.listRequests({ ...collection, query: 'get users' });
+    expect(requestByUid).toMatchObject({ uid: requestUid, item_pathname: 'get-users.yml' });
+    expect(requestByUid.definition.uid).toBe(requestUid);
+    expect(listedRequests.requests).toEqual([expect.objectContaining({ uid: requestUid, item_pathname: 'get-users.yml' })]);
+    expect(searchedRequests.requests).toEqual([expect.objectContaining({ uid: requestUid, item_pathname: 'get-users.yml' })]);
+
+    const createdEnvironment = await service.createEnvironment({
+      ...collection,
+      name: 'Local',
+      definition: { variables: [{ name: 'baseUrl', value: 'https://api.test', enabled: true, secret: false }] }
+    });
+    const environmentUid = createdEnvironment.environment.uid;
+    expect(createdEnvironment.environment.definition.uid).toBe(environmentUid);
+
+    const environmentByUid = await service.getEnvironment({ ...collection, environment_uid: environmentUid });
+    const listedEnvironments = await service.listEnvironments(collection);
+    expect(environmentByUid.environment).toMatchObject({ uid: environmentUid, filename: 'Local.yml' });
+    expect(environmentByUid.environment.definition.uid).toBe(environmentUid);
+    expect(listedEnvironments.environments).toEqual([expect.objectContaining({ uid: environmentUid, filename: 'Local.yml' })]);
+  });
+
   it('clones, moves, resequences, searches, and removes collection data', async () => {
     await service.createCollection({ workspace_uid: 'workspace_service', name: 'Source API', folder_name: 'source' });
     await service.createFolder({ workspace_uid: 'workspace_service', collection_path: 'source', folder_name: 'users', name: 'Users' });
