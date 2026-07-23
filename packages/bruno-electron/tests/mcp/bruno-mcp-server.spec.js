@@ -23,7 +23,9 @@ const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
 const { BrunoMcpServerManager } = require('../../src/mcp/server');
 const LastOpenedWorkspaces = require('../../src/store/last-opened-workspaces');
+const snapshotManager = require('../../src/services/snapshot');
 const { createWorkspaceConfig, writeWorkspaceConfig, getWorkspaceUid } = require('../../src/utils/workspace-config');
+const { createExecutionEventContext } = require('../../src/services/request-execution/execution-event-context');
 
 const getFreePort = () => new Promise((resolve, reject) => {
   const server = http.createServer();
@@ -84,6 +86,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   let lastOpenedWorkspaces;
 
   beforeEach(async () => {
+    snapshotManager.resetSnapshot();
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'bruno-mcp-server-'));
     workspacePath = path.join(root, 'workspace');
     collectionPath = path.join(workspacePath, 'collections', 'api');
@@ -117,6 +120,8 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
       metadata: jest.fn(async () => ({ fingerprint: 'fingerprint', createdAt: '2026-07-21T00:00:00.000Z', rotatedAt: null }))
     };
     requestExecutionService = {
+      createEventContext: (options) => createExecutionEventContext(options),
+      emitEvent: () => {},
       executeWithLegacy: jest.fn(async ({ item, runtimeVariables, executionContext }) => {
         await executionContext.requestGuard({ url: item.request.url, method: item.request.method });
         return {
@@ -146,13 +151,15 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
   afterEach(async () => {
     await manager?.stop();
     lastOpenedWorkspaces.remove(workspacePath);
+    snapshotManager.resetSnapshot();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('exposes a flat collection/request surface and omits Flow Studio and Intelligence tools', async () => {
     const client = await connect(manager.endpoint, token);
     try {
-      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      const tools = (await client.listTools()).tools;
+      const names = tools.map((tool) => tool.name);
       expect(names).toEqual(expect.arrayContaining([
         'bruno_list_collections',
         'bruno_get_collection',
@@ -167,6 +174,18 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
       ]));
       expect(names.some((name) => name.includes('flow'))).toBe(false);
       expect(names.some((name) => name.includes('intelligence'))).toBe(false);
+      for (const name of [
+        'bruno_get_request',
+        'bruno_create_request',
+        'bruno_update_request',
+        'bruno_update_request_tab',
+        'bruno_duplicate_request',
+        'bruno_prepare_request',
+        'bruno_run_request'
+      ]) {
+        expect(tools.find((tool) => tool.name === name).inputSchema.properties).toHaveProperty('showOnUi');
+      }
+      expect(tools.find((tool) => tool.name === 'bruno_delete_request').inputSchema.properties).not.toHaveProperty('showOnUi');
 
       const collections = parseToolText(await client.callTool({ name: 'bruno_list_collections', arguments: { workspace_uid: workspaceUid } }));
       expect(collections.collections).toEqual([expect.objectContaining({ name: 'MCP API', collection_path: 'collections/api' })]);
@@ -264,6 +283,7 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(stored.status).toBe('success');
+      expect(stored).not.toHaveProperty('showOnUi');
       expect(stored.result.response.body).toEqual({ access_token: 'raw-api-secret', visible: 'ok' });
       expect(stored.request.prepared_request.method).toBe('POST');
       expect(requestExecutionService.executeWithLegacy).toHaveBeenCalledWith(expect.objectContaining({ executionContext: expect.objectContaining({ source: 'mcp' }) }));
@@ -272,6 +292,105 @@ describe('Bruno collection MCP Streamable HTTP integration', () => {
       expect(JSON.parse(resource.contents[0].text).result.response.status).toBe(200);
     } finally {
       await client.close();
+    }
+  });
+
+  it('opens a request on the UI only when its workspace is current', async () => {
+    snapshotManager.saveSnapshot({ ...snapshotManager.getSnapshot(), activeWorkspacePath: workspacePath });
+    const mainWindow = { isDestroyed: () => false, webContents: { send: jest.fn() } };
+    manager.setMainWindow(mainWindow);
+
+    const client = await connect(manager.endpoint, token);
+    try {
+      const reference = {
+        workspace_uid: workspaceUid,
+        collection_path: 'collections/api',
+        item_pathname: 'users/get-users.bru',
+        showOnUi: true
+      };
+      const result = parseToolText(await client.callTool({ name: 'bruno_get_request', arguments: reference }));
+
+      expect(result.showOnUi).toEqual({ requested: true, available: true, status: 'requested' });
+      expect(mainWindow.webContents.send).toHaveBeenCalledWith('main:mcp-show-request', expect.objectContaining({
+        workspaceUid,
+        pathname: path.join(collectionPath, 'users', 'get-users.bru')
+      }));
+      expect(snapshotManager.getSnapshot().activeWorkspacePath).toBe(workspacePath);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('runs a request in a non-current workspace without switching and reports showOnUi unavailable', async () => {
+    const otherWorkspacePath = path.join(root, 'other-request-workspace');
+    const otherCollectionPath = path.join(otherWorkspacePath, 'collections', 'api');
+    fs.mkdirSync(path.join(otherCollectionPath, 'users'), { recursive: true });
+    fs.writeFileSync(path.join(otherCollectionPath, 'bruno.json'), JSON.stringify({ version: '1', name: 'Other API', type: 'collection' }, null, 2));
+    fs.writeFileSync(path.join(otherCollectionPath, 'users', 'get-users.bru'), stringifyRequest(requestDefinition(), { format: 'bru' }));
+    await writeWorkspaceConfig(otherWorkspacePath, createWorkspaceConfig('Other request workspace'));
+    lastOpenedWorkspaces.add(otherWorkspacePath);
+    const otherWorkspaceUid = getWorkspaceUid(otherWorkspacePath);
+    snapshotManager.saveSnapshot({ ...snapshotManager.getSnapshot(), activeWorkspacePath: workspacePath });
+
+    const mainWindow = { isDestroyed: () => false, webContents: { send: jest.fn() } };
+    manager.setMainWindow(mainWindow);
+    const client = await connect(manager.endpoint, token);
+    try {
+      const created = parseToolText(await client.callTool({
+        name: 'bruno_create_request',
+        arguments: {
+          workspace_uid: otherWorkspaceUid,
+          collection_path: 'collections/api',
+          folder_path: 'users',
+          name: 'Created in background',
+          filename: 'created-in-background',
+          method: 'GET',
+          url: 'https://api.test/background',
+          showOnUi: true
+        }
+      }));
+      expect(created.showOnUi).toMatchObject({ available: false, reason: 'workspace_not_current' });
+
+      const updated = parseToolText(await client.callTool({
+        name: 'bruno_update_request',
+        arguments: {
+          workspace_uid: otherWorkspaceUid,
+          collection_path: 'collections/api',
+          item_pathname: 'users/created-in-background.bru',
+          name: 'Updated in background',
+          showOnUi: true
+        }
+      }));
+      expect(updated.definition.name).toBe('Updated in background');
+      expect(updated.showOnUi).toMatchObject({ available: false, reason: 'workspace_not_current' });
+
+      const result = parseToolText(await client.callTool({
+        name: 'bruno_run_request',
+        arguments: {
+          workspace_uid: otherWorkspaceUid,
+          collection_path: 'collections/api',
+          item_pathname: 'users/get-users.bru',
+          showOnUi: true
+        }
+      }));
+
+      expect(result.status).toBe('success');
+      expect(result.showOnUi).toMatchObject({
+        requested: true,
+        available: false,
+        status: 'unavailable',
+        reason: 'workspace_not_current'
+      });
+      expect(result.showOnUi.message).toContain('handled in the background');
+      expect(snapshotManager.getSnapshot().activeWorkspacePath).toBe(workspacePath);
+      expect(mainWindow.webContents.send.mock.calls.some(([channel]) => channel === 'main:mcp-show-request')).toBe(false);
+      expect(requestExecutionService.executeWithLegacy).toHaveBeenCalledWith(expect.objectContaining({
+        workspaceContext: { uid: otherWorkspaceUid, pathname: otherWorkspacePath },
+        executionContext: expect.objectContaining({ runInBackground: true })
+      }));
+    } finally {
+      await client.close();
+      lastOpenedWorkspaces.remove(otherWorkspacePath);
     }
   });
 

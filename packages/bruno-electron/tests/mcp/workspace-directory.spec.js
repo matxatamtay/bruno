@@ -20,7 +20,7 @@ const path = require('node:path');
 const LastOpenedWorkspaces = require('../../src/store/last-opened-workspaces');
 const snapshotManager = require('../../src/services/snapshot');
 const { createWorkspaceConfig, writeWorkspaceConfig, getWorkspaceUid } = require('../../src/utils/workspace-config');
-const { buildWorkspaceDirectory, createWorkspaceActivator, createWorkspaceManager } = require('../../src/mcp/workspace-directory');
+const { buildWorkspaceDirectory, createWorkspaceActivator, createRequestPresenter, createWorkspaceManager } = require('../../src/mcp/workspace-directory');
 
 describe('Bruno MCP workspace directory', () => {
   let root;
@@ -100,6 +100,58 @@ describe('Bruno MCP workspace directory', () => {
 
       expect(new LastOpenedWorkspaces().getAll()).toContain(targetPath);
       expect(snapshotManager.getSnapshot().activeWorkspacePath).toBe(targetPath);
+    });
+  });
+
+  describe('createRequestPresenter', () => {
+    it('asks the renderer to open a request only when its workspace is current', async () => {
+      const workspacePath = await makeWorkspace('workspace-current');
+      lastOpenedWorkspaces.add(workspacePath);
+      snapshotManager.saveSnapshot({ ...snapshotManager.getSnapshot(), activeWorkspacePath: workspacePath });
+
+      const mainWindow = { isDestroyed: () => false, webContents: { send: jest.fn() } };
+      const present = createRequestPresenter({ getMainWindow: () => mainWindow });
+      const request = {
+        collection_pathname: path.join(workspacePath, 'collections', 'api'),
+        item_pathname: 'users/get-user.bru',
+        pathname: path.join(workspacePath, 'collections', 'api', 'users', 'get-user.bru'),
+        uid: 'request_1',
+        type: 'http-request'
+      };
+
+      expect(present({ uid: getWorkspaceUid(workspacePath), path: workspacePath }, request)).toEqual({
+        requested: true,
+        available: true,
+        status: 'requested'
+      });
+      expect(mainWindow.webContents.send).toHaveBeenCalledWith('main:mcp-show-request', expect.objectContaining({
+        workspaceUid: getWorkspaceUid(workspacePath),
+        pathname: request.pathname,
+        requestUid: request.uid
+      }));
+    });
+
+    it('reports showOnUi as unavailable without changing a non-current workspace', async () => {
+      const currentPath = await makeWorkspace('workspace-current');
+      const targetPath = await makeWorkspace('workspace-target');
+      lastOpenedWorkspaces.add(currentPath);
+      lastOpenedWorkspaces.add(targetPath);
+      snapshotManager.saveSnapshot({ ...snapshotManager.getSnapshot(), activeWorkspacePath: currentPath });
+
+      const mainWindow = { isDestroyed: () => false, webContents: { send: jest.fn() } };
+      const present = createRequestPresenter({ getMainWindow: () => mainWindow });
+      const result = present({ uid: getWorkspaceUid(targetPath), path: targetPath }, {
+        collection_pathname: path.join(targetPath, 'collections', 'api'),
+        item_pathname: 'get-user.bru',
+        pathname: path.join(targetPath, 'collections', 'api', 'get-user.bru'),
+        uid: 'request_2',
+        type: 'http-request'
+      });
+
+      expect(result).toMatchObject({ available: false, status: 'unavailable', reason: 'workspace_not_current' });
+      expect(result.message).toContain('handled in the background');
+      expect(snapshotManager.getSnapshot().activeWorkspacePath).toBe(currentPath);
+      expect(mainWindow.webContents.send).not.toHaveBeenCalled();
     });
   });
 

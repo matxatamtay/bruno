@@ -211,7 +211,7 @@ class BrunoCollectionService {
     return filterByName(workspaces, input);
   }
 
-  async resolveWorkspace({ workspace_uid: workspaceUid, workspace_path: workspacePath } = {}) {
+  async resolveWorkspace({ workspace_uid: workspaceUid, workspace_path: workspacePath, _skipWorkspaceActivation = false } = {}) {
     const known = this.listWorkspaces();
     let workspace;
     if (workspacePath) {
@@ -232,7 +232,7 @@ class BrunoCollectionService {
       error.code = 'BRUNO_MCP_WORKSPACE_REQUIRED';
       throw error;
     }
-    if (this.onWorkspaceResolved) {
+    if (this.onWorkspaceResolved && !_skipWorkspaceActivation) {
       await this.onWorkspaceResolved(workspace).catch((error) => {
         console.error('Bruno MCP failed to activate workspace:', error?.message || error);
       });
@@ -554,7 +554,10 @@ class BrunoCollectionService {
     const workspace = await this.resolveWorkspace(input);
     const collections = input.collection_path
       ? [{ collection_path: input.collection_path }]
-      : (await this.listCollections({ workspace_path: workspace.path })).collections;
+      : (await this.listCollections({
+          workspace_path: workspace.path,
+          _skipWorkspaceActivation: input._skipWorkspaceActivation
+        })).collections;
     const query = String(input.query || '').trim().toLowerCase();
     const limit = Math.max(1, Math.min(10000, Number(input.limit) || this.getConfig().maxRequestFiles || 10000));
     const requests = [];
@@ -583,7 +586,11 @@ class BrunoCollectionService {
     };
     for (const collection of collections) {
       if (requests.length >= limit) break;
-      const tree = await this.listItems({ workspace_path: workspace.path, collection_path: collection.collection_path });
+      const tree = await this.listItems({
+        workspace_path: workspace.path,
+        collection_path: collection.collection_path,
+        _skipWorkspaceActivation: input._skipWorkspaceActivation
+      });
       collectItems(tree.items, collection.collection_path);
     }
     return { workspace_uid: workspace.uid, workspace_path: workspace.path, count: requests.length, requests };
@@ -635,7 +642,12 @@ class BrunoCollectionService {
     const requestPath = path.join(parent, definition.filename);
     if (await exists(requestPath)) throw new Error(`Request ${requestPath} already exists`);
     await writeFile(requestPath, stringifyRequest(definition, { format }));
-    return this.readRequest({ workspace_path: workspace.path, collection_path: collectionPath, item_pathname: path.relative(collectionPath, requestPath) });
+    return this.readRequest({
+      workspace_path: workspace.path,
+      collection_path: collectionPath,
+      item_pathname: path.relative(collectionPath, requestPath),
+      _skipWorkspaceActivation: input._skipWorkspaceActivation
+    });
   }
 
   async updateRequest(input = {}) {
@@ -655,7 +667,12 @@ class BrunoCollectionService {
     if (!REQUEST_TYPES.has(next.type) && next.type !== 'app') throw new Error(`Unsupported request type ${next.type}`);
     await writeFile(targetPath, stringifyRequest(next, { format: current.format }));
     if (targetPath !== current.pathname) await fsPromises.unlink(current.pathname);
-    return this.readRequest({ workspace_path: current.workspace_path, collection_path: current.collection_pathname, item_pathname: path.relative(current.collection_pathname, targetPath) });
+    return this.readRequest({
+      workspace_path: current.workspace_path,
+      collection_path: current.collection_pathname,
+      item_pathname: path.relative(current.collection_pathname, targetPath),
+      _skipWorkspaceActivation: input._skipWorkspaceActivation
+    });
   }
 
   async updateRequestTab(input = {}) {
@@ -691,7 +708,8 @@ class BrunoCollectionService {
       filename: input.filename || `${path.basename(current.item_pathname, path.extname(current.item_pathname))}-copy`,
       definition: copy,
       name: copy.name,
-      type: copy.type
+      type: copy.type,
+      _skipWorkspaceActivation: input._skipWorkspaceActivation
     });
   }
 
@@ -776,7 +794,7 @@ class BrunoCollectionService {
       await fsPromises.unlink(currentPath);
       environmentSecretsStore.renameEnvironment(collectionPath, current.environment.name, next.name);
     }
-    return this.getEnvironment({ workspace_path: workspace.path, collection_path: collectionPath, environment_name: next.name });
+    return this.getEnvironment({ workspace_path: workspace.path, collection_path: collectionPath, environment_filename: targetFilename });
   }
 
   async deleteEnvironment(input = {}) {

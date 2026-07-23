@@ -1,9 +1,10 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { stringifyRequest } = require('@usebruno/filestore');
+const { stringifyRequest, parseEnvironment } = require('@usebruno/filestore');
 const { BrunoRequestContextResolver } = require('../../src/mcp/request-context-resolver');
 const { BrunoMcpAutomationFacade } = require('../../src/mcp/automation-facade');
+const { createExecutionEventContext } = require('../../src/services/request-execution/execution-event-context');
 
 const write = (pathname, content) => {
   fs.mkdirSync(path.dirname(pathname), { recursive: true });
@@ -86,6 +87,8 @@ describe('Bruno MCP API runner', () => {
 
   it('runs read and mutation methods directly, keeps complete results, and supports asynchronous retrieval', async () => {
     const requestExecutionService = {
+      createEventContext: (options) => createExecutionEventContext(options),
+      emitEvent: () => {},
       executeWithLegacy: jest.fn(async ({ item, environmentContext, runtimeVariables, executionContext }) => {
         await executionContext.requestGuard({ url: item.request.url, method: item.request.method });
         return {
@@ -141,5 +144,46 @@ describe('Bruno MCP API runner', () => {
     await facade.requestRuns.get(started.run_id).promise;
     expect(facade.getRequestRun({ run_id: started.run_id }).result.response.status).toBe(201);
     expect(requestExecutionService.executeWithLegacy).toHaveBeenCalledTimes(3);
+  });
+
+  it('persists a post-response script\'s bru.setEnvVar to the environment file on disk, like the desktop app does', async () => {
+    const requestExecutionService = {
+      createEventContext: (options) => createExecutionEventContext(options),
+      emitEvent: () => {},
+      executeWithLegacy: jest.fn(async ({ executionContext }) => {
+        executionContext.eventContext.emitLegacy('main:script-environment-update', {
+          envVariables: { base_url: 'https://api.test', access_token: 'issued-token', __name__: 'Local' }
+        });
+        return {
+          result: { executionId: executionContext.executionId, status: 'success', response: { status: 200 } },
+          legacyResult: { status: 200 }
+        };
+      })
+    };
+    const facade = new BrunoMcpAutomationFacade({
+      requestExecutionService,
+      configProvider: () => config,
+      idFactory: () => 'run_1'
+    });
+
+    await facade.runRequest({
+      workspace_uid: workspace.uid,
+      collection_path: 'collections/api',
+      item_pathname: 'users/get-user.bru',
+      environment_name: 'Local',
+      runtime_variables: { user_id: 'usr_42' }
+    });
+
+    const environment = parseEnvironment(fs.readFileSync(path.join(collectionPath, 'environments', 'Local.bru'), 'utf8'), { format: 'bru' });
+    const accessToken = environment.variables.find((variable) => variable.name === 'access_token');
+    expect(accessToken?.value).toBe('issued-token');
+    expect(environment.variables.some((variable) => variable.name === '__name__')).toBe(false);
+
+    const readBack = await facade.getEnvironment({
+      workspace_uid: workspace.uid,
+      collection_path: 'collections/api',
+      environment_name: 'Local'
+    });
+    expect(readBack.environment.definition.variables.find((variable) => variable.name === 'access_token').value).toBe('issued-token');
   });
 });
