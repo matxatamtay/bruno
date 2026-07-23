@@ -8,7 +8,7 @@ const { McpTokenStore } = require('./token-store');
 const { redactMcpValue, safeMcpError } = require('./redaction');
 const { BrunoMcpAutomationFacade } = require('./automation-facade');
 const { createMcpClientConfigurations } = require('./client-config');
-const { buildWorkspaceDirectory, createWorkspaceActivator, createWorkspaceManager } = require('./workspace-directory');
+const { buildWorkspaceDirectory, createWorkspaceActivator, createRequestPresenter, createWorkspaceManager } = require('./workspace-directory');
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const jsonText = (value) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
@@ -55,12 +55,16 @@ const nameFilterSchema = {
   name_regex: z.string().min(1).optional()
 };
 const collectionSchema = { ...commonWorkspaceSchema, collection_path: z.string().min(1) };
-const requestReferenceSchema = {
+const requestLocatorSchema = {
   ...commonWorkspaceSchema,
   request_uid: z.string().min(1).optional(),
   collection_path: z.string().min(1).optional(),
   item_pathname: z.string().min(1).optional()
 };
+const requestUiSchema = {
+  showOnUi: z.boolean().optional().describe('Open or focus the request in Bruno when it belongs to the current workspace. Defaults to false and never switches workspaces.')
+};
+const requestReferenceSchema = { ...requestLocatorSchema, ...requestUiSchema };
 const mutationSchema = {
   definition: z.record(z.string(), z.unknown()).optional(),
   changes: z.record(z.string(), z.unknown()).optional(),
@@ -100,7 +104,7 @@ const registerBrunoMcpTools = (mcp, { facade, onCall }) => {
   };
 
   register('bruno_status', 'Return Bruno Desktop MCP capabilities.', {}, () => facade.status(), { readOnlyHint: true, idempotentHint: true });
-  register('bruno_list_workspaces', 'List every workspace Bruno currently manages (the same set shown in Manage Workspaces), marking which one is current. Filter by name with name_ilike (case-insensitive substring) and/or name_regex. An explicit workspace_path can also be passed directly to every tool, including a path outside this list — the app will open it and switch to it automatically.', nameFilterSchema, (args) => facade.listWorkspaces(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_list_workspaces', 'List every workspace Bruno currently manages (the same set shown in Manage Workspaces), marking which one is current. Filter by name with name_ilike (case-insensitive substring) and/or name_regex. An explicit workspace_path can still target a path outside this list. Request tools use it without switching workspaces; showOnUi only opens a request that belongs to the current workspace.', nameFilterSchema, (args) => facade.listWorkspaces(args), { readOnlyHint: true, idempotentHint: true });
   register('bruno_list_discovery_workspaces', 'List the workspace paths manually configured in Preferences → MCP for discovery. These are not necessarily open/managed in the app yet; use bruno_add_workspace to bring one into Manage Workspaces. Supports the same name_ilike/name_regex filters as bruno_list_workspaces.', nameFilterSchema, (args) => facade.listDiscoveryWorkspaces(args), { readOnlyHint: true, idempotentHint: true });
   register('bruno_add_workspace', 'Register an existing workspace folder (one containing a workspace.yml) into Manage Workspaces, without changing which workspace is currently active.', { workspace_path: z.string().min(1) }, (args) => facade.addWorkspace(args));
   register('bruno_create_workspace', 'Scaffold a brand-new Bruno workspace in an empty (or new) folder and register it into Manage Workspaces.', {
@@ -165,9 +169,10 @@ const registerBrunoMcpTools = (mcp, { facade, onCall }) => {
 
   register('bruno_list_requests', 'List requests across a workspace or one collection.', { ...commonWorkspaceSchema, collection_path: z.string().optional(), limit: z.number().int().min(1).max(10000).optional() }, (args) => facade.listRequests(args), { readOnlyHint: true, idempotentHint: true });
   register('bruno_search_requests', 'Search requests by name, type, method, URL, collection, or pathname.', { ...commonWorkspaceSchema, collection_path: z.string().optional(), query: z.string().min(1), limit: z.number().int().min(1).max(10000).optional() }, (args) => facade.searchRequests(args), { readOnlyHint: true, idempotentHint: true });
-  register('bruno_get_request', 'Get the complete editable request definition, including name and every persisted request tab and field. Values are not reduced to a read-only projection.', requestReferenceSchema, (args) => facade.getRequest(args), { readOnlyHint: true, idempotentHint: true });
-  register('bruno_create_request', 'Create HTTP, GraphQL, gRPC, WebSocket, or SSE request. Pass definition to set every field in one call.', {
+  register('bruno_get_request', 'Get the complete editable request definition, including name and every persisted request tab and field. Set showOnUi to open or focus it without switching workspaces.', requestReferenceSchema, (args) => facade.getRequest(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_create_request', 'Create HTTP, GraphQL, gRPC, WebSocket, or SSE request. Pass definition to set every field in one call. Set showOnUi to open the created request when its workspace is current.', {
     ...collectionSchema,
+    ...requestUiSchema,
     folder_path: z.string().optional(),
     name: z.string().min(1),
     filename: z.string().optional(),
@@ -177,19 +182,19 @@ const registerBrunoMcpTools = (mcp, { facade, onCall }) => {
     seq: z.number().optional(),
     definition: z.record(z.string(), z.unknown()).optional()
   }, (args) => facade.createRequest(args));
-  register('bruno_update_request', 'Replace, deep-merge, set, or unset any request field, and optionally rename/move its file. This is the universal editor for all present and future request fields.', {
+  register('bruno_update_request', 'Replace, deep-merge, set, or unset any request field, and optionally rename/move its file. Set showOnUi to open or focus the updated request when its workspace is current.', {
     ...requestReferenceSchema,
     name: z.string().optional(),
     new_item_pathname: z.string().optional(),
     ...mutationSchema
   }, (args) => facade.updateRequest(args));
-  register('bruno_update_request_tab', 'Edit one request tab directly. Supports params, body, headers/metadata, auth, vars, script, assert, tests, docs, GraphQL query, gRPC/WebSocket message, examples, app, and settings.', {
+  register('bruno_update_request_tab', 'Edit one request tab directly. Supports params, body, headers/metadata, auth, vars, script, assert, tests, docs, GraphQL query, gRPC/WebSocket message, examples, app, and settings. Set showOnUi to open or focus the request when its workspace is current.', {
     ...requestReferenceSchema,
     tab: z.string().min(1),
     value: z.unknown()
   }, (args) => facade.updateRequestTab(args));
-  register('bruno_duplicate_request', 'Duplicate a request with all tabs and examples preserved.', { ...requestReferenceSchema, name: z.string().optional(), filename: z.string().optional(), folder_path: z.string().optional() }, (args) => facade.duplicateRequest(args));
-  register('bruno_delete_request', 'Delete a request file.', requestReferenceSchema, (args) => facade.deleteRequest(args), { destructiveHint: true });
+  register('bruno_duplicate_request', 'Duplicate a request with all tabs and examples preserved. Set showOnUi to open the copy when its workspace is current.', { ...requestReferenceSchema, name: z.string().optional(), filename: z.string().optional(), folder_path: z.string().optional() }, (args) => facade.duplicateRequest(args));
+  register('bruno_delete_request', 'Delete a request file.', requestLocatorSchema, (args) => facade.deleteRequest(args), { destructiveHint: true });
 
   register('bruno_list_environments', 'List complete collection environments and their variable definitions.', collectionSchema, (args) => facade.listEnvironments(args), { readOnlyHint: true, idempotentHint: true });
   register('bruno_get_environment', 'Get one complete environment definition.', {
@@ -224,8 +229,8 @@ const registerBrunoMcpTools = (mcp, { facade, onCall }) => {
   register('bruno_set_dotenv', 'Create or replace a collection .env file from raw content or a variables object.', { ...collectionSchema, filename: z.string().optional(), content: z.string().optional(), variables: z.record(z.string(), z.unknown()).optional() }, (args) => facade.setDotEnv(args));
   register('bruno_delete_dotenv', 'Delete a collection .env file.', { ...collectionSchema, filename: z.string().optional() }, (args) => facade.deleteDotEnv(args), { destructiveHint: true });
 
-  register('bruno_prepare_request', 'Resolve a request through normal Bruno collection, folder, environment, dotenv, runtime, and prompt-variable precedence without sending it.', executionSchema, (args) => facade.prepareRequest(args), { readOnlyHint: true, idempotentHint: true });
-  register('bruno_run_request', 'Run any Bruno request through the normal desktop execution engine. POST/PUT/PATCH/DELETE do not require a separate MCP policy approval. Returns the complete stored run result.', {
+  register('bruno_prepare_request', 'Resolve a request through normal Bruno collection, folder, environment, dotenv, runtime, and prompt-variable precedence without sending it. Set showOnUi to open or focus it when its workspace is current.', executionSchema, (args) => facade.prepareRequest(args), { readOnlyHint: true, idempotentHint: true });
+  register('bruno_run_request', 'Run any Bruno request through the normal desktop execution engine without switching workspaces. Set showOnUi to open or focus it only when its workspace is current. Returns the complete stored run result.', {
     ...executionSchema,
     run_id: z.string().optional(),
     correlation_id: z.string().optional(),
@@ -264,6 +269,7 @@ class BrunoMcpServerManager {
       configProvider,
       now,
       onWorkspaceResolved: createWorkspaceActivator({ getMainWindow, workspaceWatcher: this.workspaceWatcher }),
+      showRequestOnUi: createRequestPresenter({ getMainWindow }),
       workspaceManager: createWorkspaceManager({ getMainWindow, workspaceWatcher: this.workspaceWatcher, configProvider })
     });
     this.clients = new Map();

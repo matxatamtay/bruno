@@ -67,6 +67,60 @@ const createWorkspaceActivator = ({ getMainWindow, workspaceWatcher }) => async 
   }
 };
 
+const createRequestPresenter = ({ getMainWindow }) => (workspace, request) => {
+  const currentWorkspace = buildWorkspaceDirectory().find((entry) => entry.current);
+  const normalizedTargetPath = normalizeWorkspacePathname(workspace.path);
+  const isCurrentWorkspace = currentWorkspace
+    && normalizeWorkspacePathname(currentWorkspace.path) === normalizedTargetPath;
+
+  if (!isCurrentWorkspace) {
+    return {
+      requested: true,
+      available: false,
+      status: 'unavailable',
+      reason: 'workspace_not_current',
+      message: 'showOnUi is unavailable because this request is not in the current workspace. The request was handled in the background without changing the current workspace.'
+    };
+  }
+
+  const mainWindow = getMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed?.() || mainWindow.webContents?.isDestroyed?.()) {
+    return {
+      requested: true,
+      available: false,
+      status: 'unavailable',
+      reason: 'ui_not_available',
+      message: 'showOnUi is unavailable because the Bruno window is not available.'
+    };
+  }
+
+  try {
+    mainWindow.webContents.send('main:mcp-show-request', {
+      workspaceUid: workspace.uid,
+      workspacePath: workspace.path,
+      collectionPathname: request.collection_pathname,
+      itemPathname: request.item_pathname,
+      pathname: request.pathname,
+      requestUid: request.uid,
+      type: request.type
+    });
+  } catch (_) {
+    return {
+      requested: true,
+      available: false,
+      status: 'unavailable',
+      reason: 'ui_not_available',
+      message: 'showOnUi is unavailable because the Bruno window is not available.'
+    };
+  }
+
+  return {
+    requested: true,
+    available: true,
+    status: 'requested'
+  };
+};
+
 // Backs bruno_list_discovery_workspaces / bruno_add_workspace / bruno_create_workspace: the
 // manually-configured discovery path list plus the ability to promote a path into a real managed
 // workspace (add) or scaffold a brand-new one (create), reusing the same on-disk logic the
@@ -103,5 +157,6 @@ module.exports = {
   buildWorkspaceDirectory,
   filterByName,
   createWorkspaceActivator,
+  createRequestPresenter,
   createWorkspaceManager
 };

@@ -1,6 +1,8 @@
 const { randomUUID } = require('node:crypto');
 const { BrunoCollectionService } = require('./collection-service');
 const { BrunoRequestContextResolver, environmentProjection } = require('./request-context-resolver');
+const { persistScriptVariableChanges } = require('./variable-persistence');
+const { inferProtocol } = require('../services/request-execution-service');
 
 const withTimeout = async (promise, timeoutMs, label) => {
   let timer;
@@ -21,7 +23,7 @@ class McpRequestRunRepository {
     this.records = new Map();
   }
 
-  create({ runId, request }) {
+  create({ runId, request, showOnUi = null }) {
     while (this.records.size >= this.maxRecords) this.records.delete(this.records.keys().next().value);
     const record = {
       run_id: runId,
@@ -29,6 +31,7 @@ class McpRequestRunRepository {
       created_at: this.now().toISOString(),
       updated_at: this.now().toISOString(),
       request,
+      showOnUi,
       result: null,
       error: null
     };
@@ -64,6 +67,7 @@ class McpRequestRunRepository {
       created_at: record.created_at,
       updated_at: record.updated_at,
       request: record.request,
+      ...(record.showOnUi ? { showOnUi: record.showOnUi } : {}),
       result: record.result,
       legacy_result: record.legacy_result || null,
       error: record.error
@@ -72,11 +76,12 @@ class McpRequestRunRepository {
 }
 
 class BrunoMcpAutomationFacade {
-  constructor({ requestExecutionService, configProvider, onWorkspaceResolved, workspaceManager, idFactory = randomUUID, now = () => new Date() } = {}) {
+  constructor({ requestExecutionService, configProvider, onWorkspaceResolved, showRequestOnUi, workspaceManager, idFactory = randomUUID, now = () => new Date() } = {}) {
     if (!requestExecutionService) throw new TypeError('BrunoMcpAutomationFacade requires requestExecutionService');
     this.requestExecutionService = requestExecutionService;
     this.configProvider = configProvider;
     this.workspaceManager = workspaceManager;
+    this.showRequestOnUi = showRequestOnUi;
     this.idFactory = idFactory;
     this.now = now;
     this.collections = new BrunoCollectionService({ configProvider, onWorkspaceResolved });
@@ -138,18 +143,62 @@ class BrunoMcpAutomationFacade {
   getDotEnv(input) { return this.collections.getDotEnv(input); }
   setDotEnv(input) { return this.collections.setDotEnv(input); }
   deleteDotEnv(input) { return this.collections.deleteDotEnv(input); }
-  listRequests(input) { return this.collections.listRequests(input); }
-  searchRequests(input) { return this.collections.listRequests(input); }
-  getRequest(input) { return this.collections.getRequest(input); }
-  createRequest(input) { return this.collections.createRequest(input); }
-  updateRequest(input) { return this.collections.updateRequest(input); }
-  updateRequestTab(input) { return this.collections.updateRequestTab(input); }
-  deleteRequest(input) { return this.collections.deleteRequest(input); }
-  duplicateRequest(input) { return this.collections.duplicateRequest(input); }
+  requestInput(input = {}) {
+    return { ...input, _skipWorkspaceActivation: true };
+  }
+
+  requestUiStatus(input, request) {
+    if (!input?.showOnUi) return null;
+    if (!this.showRequestOnUi) {
+      return {
+        requested: true,
+        available: false,
+        status: 'unavailable',
+        reason: 'ui_not_available',
+        message: 'showOnUi is unavailable because the Bruno window is not available.'
+      };
+    }
+    return this.showRequestOnUi({ uid: request.workspace_uid, path: request.workspace_path }, request);
+  }
+
+  withRequestUi(input, request, result = request) {
+    const showOnUi = this.requestUiStatus(input, request);
+    return showOnUi ? { ...result, showOnUi } : result;
+  }
+
+  listRequests(input) { return this.collections.listRequests(this.requestInput(input)); }
+  searchRequests(input) { return this.collections.listRequests(this.requestInput(input)); }
+  async getRequest(input) {
+    const request = await this.collections.getRequest(this.requestInput(input));
+    return this.withRequestUi(input, request);
+  }
+
+  async createRequest(input) {
+    const request = await this.collections.createRequest(this.requestInput(input));
+    return this.withRequestUi(input, request);
+  }
+
+  async updateRequest(input) {
+    const request = await this.collections.updateRequest(this.requestInput(input));
+    return this.withRequestUi(input, request);
+  }
+
+  async updateRequestTab(input) {
+    const request = await this.collections.updateRequestTab(this.requestInput(input));
+    return this.withRequestUi(input, request);
+  }
+
+  deleteRequest(input) { return this.collections.deleteRequest(this.requestInput(input)); }
+
+  async duplicateRequest(input) {
+    const request = await this.collections.duplicateRequest(this.requestInput(input));
+    return this.withRequestUi(input, request);
+  }
 
   async resolveRequestContext(input = {}) {
-    const workspace = await this.collections.resolveWorkspace(input);
-    const request = await this.collections.getRequest({ ...input, workspace_path: workspace.path });
+    const requestInput = this.requestInput(input);
+    const workspace = await this.collections.resolveWorkspace(requestInput);
+    const request = await this.collections.getRequest({ ...requestInput, workspace_path: workspace.path });
     const context = await this.requestContextResolver.resolve({
       workspace,
       collectionPath: request.collection_pathname,
@@ -161,7 +210,7 @@ class BrunoMcpAutomationFacade {
 
   async prepareRequest(input = {}) {
     const { workspace, request, context } = await this.resolveRequestContext(input);
-    return {
+    const result = {
       workspace_uid: workspace.uid,
       workspace_path: workspace.path,
       collection_path: request.collection_path,
@@ -180,10 +229,11 @@ class BrunoMcpAutomationFacade {
       runtime_variables: context.runtimeVariables,
       prompt_variables: context.promptVariables
     };
+    return this.withRequestUi(input, request, result);
   }
 
-  async executeRequest(input = {}, runId) {
-    const { workspace, request, context } = await this.resolveRequestContext(input);
+  async executeRequest(input = {}, runId, resolvedContext = null) {
+    const { workspace, request, context } = resolvedContext || await this.resolveRequestContext(input);
     const prepared = {
       workspace_uid: workspace.uid,
       workspace_path: workspace.path,
@@ -198,21 +248,48 @@ class BrunoMcpAutomationFacade {
       prepared_request: context.preparedRequest
     };
     const correlationId = input.correlation_id || runId;
-    const execution = await withTimeout(this.requestExecutionService.executeWithLegacy({
-      workspaceContext: { uid: workspace.uid, pathname: workspace.path },
-      collection: context.collection,
-      item: context.item,
-      environmentContext: context.environment,
-      runtimeVariables: context.runtimeVariables,
-      executionContext: {
-        source: 'mcp',
-        correlationId,
+    // Built explicitly (rather than left for executeWithLegacy to create) so its raw,
+    // unredacted projection stays readable afterwards for persistence — the projection embedded
+    // in execution.result has secret-like values replaced with '[REDACTED]' for safe display.
+    const eventContext = this.requestExecutionService.createEventContext({
+      emitEvent: this.requestExecutionService.emitEvent,
+      metadata: {
         executionId: runId,
-        runInBackground: true,
-        parentExecutionMode: 'mcp-request',
-        requestGuard: () => true
+        source: 'mcp',
+        protocol: inferProtocol(context.item),
+        correlationId,
+        workspaceUid: workspace.uid
       }
-    }), this.getConfig().requestTimeoutMs || 120000, `Request ${context.item.name || context.item.uid}`);
+    });
+    let execution;
+    try {
+      execution = await withTimeout(this.requestExecutionService.executeWithLegacy({
+        workspaceContext: { uid: workspace.uid, pathname: workspace.path },
+        collection: context.collection,
+        item: context.item,
+        environmentContext: context.environment,
+        runtimeVariables: context.runtimeVariables,
+        executionContext: {
+          source: 'mcp',
+          correlationId,
+          executionId: runId,
+          runInBackground: true,
+          parentExecutionMode: 'mcp-request',
+          requestGuard: () => true,
+          eventContext
+        }
+      }), this.getConfig().requestTimeoutMs || 120000, `Request ${context.item.name || context.item.uid}`);
+    } finally {
+      await persistScriptVariableChanges({
+        collections: this.collections,
+        workspace,
+        collection: context.collection,
+        environment: context.environment,
+        variableChanges: eventContext.getProjection().variableChanges
+      }).catch((error) => {
+        console.error('Bruno MCP failed to persist script variable updates:', error?.message || error);
+      });
+    }
     return {
       run_id: runId,
       request: prepared,
@@ -224,8 +301,11 @@ class BrunoMcpAutomationFacade {
   async runRequest(input = {}) {
     const runId = String(input.run_id || this.idFactory());
     const waitMode = input.wait_mode === 'start' ? 'start' : 'complete';
+    const resolvedContext = input.showOnUi ? await this.resolveRequestContext(input) : null;
+    const showOnUi = resolvedContext ? this.requestUiStatus(input, resolvedContext.request) : null;
     const record = this.requestRuns.create({
       runId,
+      showOnUi,
       request: {
         workspace_uid: input.workspace_uid,
         workspace_path: input.workspace_path,
@@ -234,7 +314,7 @@ class BrunoMcpAutomationFacade {
         request_uid: input.request_uid
       }
     });
-    record.promise = this.executeRequest(input, runId).then((execution) => {
+    record.promise = this.executeRequest(input, runId, resolvedContext).then((execution) => {
       this.requestRuns.update(runId, { status: execution.result?.status || 'success', request: execution.request, result: execution.result, legacy_result: execution.legacy_result });
       return execution;
     }).catch((error) => {
@@ -242,7 +322,12 @@ class BrunoMcpAutomationFacade {
       throw error;
     });
     if (waitMode === 'start') {
-      return { run_id: runId, status: 'running', resource: `bruno://request-run/${encodeURIComponent(runId)}` };
+      return {
+        run_id: runId,
+        status: 'running',
+        resource: `bruno://request-run/${encodeURIComponent(runId)}`,
+        ...(showOnUi ? { showOnUi } : {})
+      };
     }
     await record.promise;
     return this.getRequestRun({ run_id: runId });

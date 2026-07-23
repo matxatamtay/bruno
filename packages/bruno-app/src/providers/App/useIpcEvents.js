@@ -48,6 +48,7 @@ import { recorderStateReceived, recorderEventReceived } from 'providers/ReduxSto
 import { openWorkspaceFlowCatalog } from 'providers/ReduxStore/slices/flow-catalog-actions';
 import { registerFlowCatalogIpcListeners } from 'providers/ReduxStore/slices/flow-catalog-events';
 import { findCollectionByUid, findItemInCollection } from 'utils/collections';
+import { showMcpRequestOnUi } from './mcpRequestUi';
 
 export const recordRunnerObservation = ({ ipcRenderer, store, val }) => {
   if (val?.type !== 'response-received' || !Number.isInteger(Number(val.responseReceived?.status))) return null;
@@ -165,6 +166,10 @@ const useIpcEvents = () => {
 
     const removeMcpWorkspaceSwitchedListener = ipcRenderer.on('main:mcp-workspace-switched', ({ workspaceUid }) => {
       dispatch(switchWorkspace(workspaceUid));
+    });
+
+    const removeMcpShowRequestListener = ipcRenderer.on('main:mcp-show-request', (payload) => {
+      showMcpRequestOnUi({ payload, dispatch, getState: store.getState });
     });
 
     const removeWorkspacesReadyListener = ipcRenderer.on('main:workspaces-ready', () => {
@@ -433,6 +438,7 @@ const useIpcEvents = () => {
       removeOpenCollectionListener();
       removeOpenWorkspaceListener();
       removeMcpWorkspaceSwitchedListener();
+      removeMcpShowRequestListener();
       removeWorkspacesReadyListener();
       removeWorkspaceConfigUpdatedListener();
       removeWorkspaceEnvironmentAddedListener();
